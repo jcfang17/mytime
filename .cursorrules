@@ -1,0 +1,32 @@
+# MyTime - Windows Time Tracking App
+
+## Project Overview
+A Windows-only time tracking application built with Rust that precisely tracks users' foreground application usage. Designed for heavy users who need accurate time management data.
+
+## Key Features
+- Tracks foreground window usage exclusively
+- Simple GUI with Start/Stop buttons and usage chart
+- System tray integration for background operation
+- CSV storage for time tracking data
+- Portable Windows application
+
+## Technical Stack
+- **Language**: Rust
+- **GUI Framework**: eframe/egui
+- **Windows API**: windows-rs for foreground window tracking
+- **Storage**: CSV files (no database in MVP)
+- **Tray Icon**: tray-icon crate
+
+## Important Notes
+- This is a Windows-only application
+- Must be compiled and tested on Windows environment
+- Focus on simplicity for MVP
+- Tracking accuracy is critical for time management
+
+## Build Instructions
+Run these commands in Windows environment:
+```
+cargo build --release
+```
+
+The executable will be in `target/release/mytime.exe`
