@@ -83,11 +83,21 @@ open MyTime.xcodeproj  # Then press ⌘+R to run
 5. **Floating Timer:** Shows current session time (visual differences per platform)
 
 ### Data Format
-Both platforms use compatible CSV format:
+Both platforms use compatible CSV format. Windows has been updated to the new schema:
+
+**New Schema (Windows - implemented):**
 ```csv
-start_time,end_time,duration,window_title,application
-2024-01-20T10:00:00,2024-01-20T10:30:00,1800,Document.txt,TextEdit
+app_name,window_title,start_time,end_time,duration_seconds,idle_seconds,keystrokes,mouse_clicks
+mytime-win.exe,MyTime,2025-07-21T00:54:39.399976-05:00,2025-07-21T00:54:42.400041800-05:00,3,0,0,1
 ```
+
+**Old Schema (macOS - needs update):**
+```csv
+app_name,window_title,start_time,duration_seconds
+"Safari","GitHub - anthropics/claude","2025-07-12T22:57:09.966196Z",120
+```
+
+See `plan.md` for schema enhancement details.
 
 ### Platform Differences
 - **Windows:** Single window with system tray, uses Win32 API for window detection

@@ -6,8 +6,10 @@ use std::time::{Duration, Instant};
 use chrono::{DateTime, Local};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::mpsc;
+use windows::Win32::System::Threading::CreateMutexW;
+use windows::Win32::Foundation::ERROR_ALREADY_EXISTS;
 
 mod tray;
 
@@ -16,7 +18,11 @@ struct TimeEntry {
     app_name: String,
     window_title: String,
     start_time: DateTime<Local>,
+    end_time: DateTime<Local>,
     duration_seconds: u64,
+    idle_seconds: u64,
+    keystrokes: u64,
+    mouse_clicks: u64,
 }
 
 struct MyTimeApp {
@@ -27,6 +33,7 @@ struct MyTimeApp {
     app_usage: Arc<Mutex<HashMap<String, Duration>>>,
     tracking_thread: Option<std::thread::JoinHandle<()>>,
     should_quit: Arc<AtomicBool>,
+    should_stop_tracking: Arc<AtomicBool>,
     window_visible: bool,
     tray_command_rx: Option<mpsc::Receiver<tray::TrayCommand>>,
     tray_manager: Option<tray::TrayManager>,
@@ -42,6 +49,7 @@ impl Default for MyTimeApp {
             app_usage: Arc::new(Mutex::new(HashMap::new())),
             tracking_thread: None,
             should_quit: Arc::new(AtomicBool::new(false)),
+            should_stop_tracking: Arc::new(AtomicBool::new(false)),
             window_visible: true,
             tray_command_rx: None,
             tray_manager: None,
@@ -59,14 +67,23 @@ impl MyTimeApp {
 
     fn start_tracking(&mut self) {
         if !self.is_tracking {
+            // Stop any existing tracking thread first
+            if self.tracking_thread.is_some() {
+                self.stop_tracking();
+                // Wait a bit for thread to stop
+                std::thread::sleep(Duration::from_millis(200));
+            }
+            
             self.is_tracking = true;
             self.current_session_start = Some(Instant::now());
+            self.should_stop_tracking.store(false, Ordering::SeqCst);
             
             let entries = Arc::clone(&self.time_entries);
             let app_usage = Arc::clone(&self.app_usage);
+            let stop_flag = Arc::clone(&self.should_stop_tracking);
             
             let handle = std::thread::spawn(move || {
-                tracker::track_foreground_window(entries, app_usage);
+                tracker::track_foreground_window(entries, app_usage, stop_flag);
             });
             
             self.tracking_thread = Some(handle);
@@ -76,12 +93,22 @@ impl MyTimeApp {
     fn stop_tracking(&mut self) {
         if self.is_tracking {
             self.is_tracking = false;
+            self.should_stop_tracking.store(true, Ordering::SeqCst);
+            
             if let Some(start) = self.current_session_start.take() {
                 self.total_tracked_time += start.elapsed();
             }
             
-            if let Ok(entries) = self.time_entries.lock() {
-                storage::save_to_csv(&entries).ok();
+            // Wait for tracking thread to finish
+            if let Some(handle) = self.tracking_thread.take() {
+                let _ = handle.join();
+            }
+            
+            if let Ok(mut entries) = self.time_entries.lock() {
+                if !entries.is_empty() {
+                    storage::save_to_csv(&entries).ok();
+                    entries.clear(); // Clear entries after saving to prevent duplicates
+                }
             }
         }
     }
@@ -127,6 +154,13 @@ impl eframe::App for MyTimeApp {
                         self.stop_tracking();
                     }
                     self.should_quit.store(true, Ordering::Relaxed);
+                }
+                tray::TrayCommand::ToggleAutoStart => {
+                    if let Some(ref mut tray_manager) = self.tray_manager {
+                        if let Err(e) = tray_manager.toggle_auto_start() {
+                            eprintln!("Failed to toggle auto-start: {}", e);
+                        }
+                    }
                 }
             }
         }
@@ -263,32 +297,108 @@ mod tracker {
     use super::*;
     use windows::Win32::Foundation::*;
     use windows::Win32::UI::WindowsAndMessaging::*;
+    use windows::Win32::UI::Input::KeyboardAndMouse::*;
+    use windows::Win32::System::SystemInformation::GetTickCount64;
     use windows::Win32::System::ProcessStatus::*;
     use windows::Win32::System::Threading::*;
     use std::ffi::OsString;
     use std::os::windows::ffi::OsStringExt;
     
+    const IDLE_THRESHOLD_MS: u32 = 30000; // 30 seconds
+    
     pub fn track_foreground_window(
         entries: Arc<Mutex<Vec<TimeEntry>>>,
-        app_usage: Arc<Mutex<HashMap<String, Duration>>>
+        app_usage: Arc<Mutex<HashMap<String, Duration>>>,
+        should_stop: Arc<AtomicBool>
     ) {
         let mut last_window_info: Option<(String, String)> = None;
-        let mut last_change_time = Instant::now();
+        let mut window_start_time = Instant::now();
+        let mut last_activity_check = Instant::now();
+        let mut idle_time_accumulated = Duration::ZERO;
+        let mut _keystrokes = 0u64;
+        let mut _mouse_clicks = 0u64;
+        
+        // Reset counters for this tracking session
+        KEYSTROKE_COUNTER.store(0, Ordering::SeqCst);
+        CLICK_COUNTER.store(0, Ordering::SeqCst);
+        
+        // Use global static counters instead of thread-local
+        static KEYSTROKE_COUNTER: AtomicU64 = AtomicU64::new(0);
+        static CLICK_COUNTER: AtomicU64 = AtomicU64::new(0);
+        
+        // Start activity monitoring thread only once globally
+        static ACTIVITY_MONITOR_STARTED: std::sync::Once = std::sync::Once::new();
+        ACTIVITY_MONITOR_STARTED.call_once(|| {
+            std::thread::spawn(|| {
+                monitor_activity();
+            });
+        });
         
         loop {
+            // Check if we should stop
+            if should_stop.load(Ordering::SeqCst) {
+                // Save final entry before stopping
+                if let Some((last_app, last_title)) = last_window_info {
+                    let duration = Instant::now() - window_start_time;
+                    let start_time = Local::now() - chrono::Duration::seconds(duration.as_secs() as i64);
+                    let end_time = Local::now();
+                    
+                    let ks = KEYSTROKE_COUNTER.swap(0, Ordering::SeqCst);
+                    let mc = CLICK_COUNTER.swap(0, Ordering::SeqCst);
+                    
+                    let entry = TimeEntry {
+                        app_name: last_app,
+                        window_title: last_title,
+                        start_time,
+                        end_time,
+                        duration_seconds: duration.as_secs(),
+                        idle_seconds: idle_time_accumulated.as_secs(),
+                        keystrokes: ks,
+                        mouse_clicks: mc,
+                    };
+                    
+                    if let Ok(mut entries_lock) = entries.lock() {
+                        entries_lock.push(entry);
+                    }
+                }
+                break;
+            }
+            
+            let now = Instant::now();
+            
+            // Check idle time
+            if now - last_activity_check >= Duration::from_secs(1) {
+                if let Some(idle_ms) = get_idle_time() {
+                    if idle_ms > IDLE_THRESHOLD_MS {
+                        idle_time_accumulated += Duration::from_secs(1);
+                    }
+                }
+                last_activity_check = now;
+            }
+            
             if let Some((app_name, window_title)) = get_foreground_window_info() {
                 let current_info = (app_name.clone(), window_title.clone());
                 
                 if last_window_info.as_ref() != Some(&current_info) {
-                    let now = Instant::now();
-                    let duration = now - last_change_time;
-                    
+                    // Window changed, save the previous entry
                     if let Some((last_app, last_title)) = last_window_info {
+                        let duration = now - window_start_time;
+                        let start_time = Local::now() - chrono::Duration::seconds(duration.as_secs() as i64);
+                        let end_time = Local::now();
+                        
+                        // Get activity counts from global counters
+                        let ks = KEYSTROKE_COUNTER.swap(0, Ordering::SeqCst);
+                        let mc = CLICK_COUNTER.swap(0, Ordering::SeqCst);
+                        
                         let entry = TimeEntry {
                             app_name: last_app.clone(),
                             window_title: last_title,
-                            start_time: Local::now() - chrono::Duration::seconds(duration.as_secs() as i64),
+                            start_time,
+                            end_time,
                             duration_seconds: duration.as_secs(),
+                            idle_seconds: idle_time_accumulated.as_secs(),
+                            keystrokes: ks,
+                            mouse_clicks: mc,
                         };
                         
                         if let Ok(mut entries_lock) = entries.lock() {
@@ -300,12 +410,67 @@ mod tracker {
                         }
                     }
                     
+                    // Reset for new window
                     last_window_info = Some(current_info);
-                    last_change_time = now;
+                    window_start_time = now;
+                    idle_time_accumulated = Duration::ZERO;
+                    _keystrokes = 0;
+                    _mouse_clicks = 0;
                 }
             }
             
             std::thread::sleep(Duration::from_millis(100));
+        }
+    }
+    
+    fn get_idle_time() -> Option<u32> {
+        unsafe {
+            let mut last_input = LASTINPUTINFO {
+                cbSize: std::mem::size_of::<LASTINPUTINFO>() as u32,
+                dwTime: 0,
+            };
+            
+            if GetLastInputInfo(&mut last_input).as_bool() {
+                let current_tick = GetTickCount64() as u32;
+                Some(current_tick - last_input.dwTime)
+            } else {
+                None
+            }
+        }
+    }
+    
+    fn monitor_activity() {
+        unsafe {
+            // Set up keyboard hook
+            let keyboard_hook = SetWindowsHookExW(
+                WH_KEYBOARD_LL,
+                Some(keyboard_proc),
+                HINSTANCE::default(),
+                0
+            ).ok();
+            
+            // Set up mouse hook  
+            let mouse_hook = SetWindowsHookExW(
+                WH_MOUSE_LL,
+                Some(mouse_proc),
+                HINSTANCE::default(),
+                0
+            ).ok();
+            
+            // Message loop
+            let mut msg = MSG::default();
+            while GetMessageW(&mut msg, HWND::default(), 0, 0).as_bool() {
+                let _ = TranslateMessage(&msg);
+                DispatchMessageW(&msg);
+            }
+            
+            // Cleanup
+            if let Some(hook) = keyboard_hook {
+                let _ = UnhookWindowsHookEx(hook);
+            }
+            if let Some(hook) = mouse_hook {
+                let _ = UnhookWindowsHookEx(hook);
+            }
         }
     }
     
@@ -348,6 +513,32 @@ mod tracker {
             Some((app_name, window_title))
         }
     }
+    
+    // Global static counters for activity monitoring
+    static KEYSTROKE_COUNTER: AtomicU64 = AtomicU64::new(0);
+    static CLICK_COUNTER: AtomicU64 = AtomicU64::new(0);
+    
+    unsafe extern "system" fn keyboard_proc(
+        code: i32,
+        wparam: WPARAM,
+        lparam: LPARAM
+    ) -> LRESULT {
+        if code >= 0 && wparam.0 == WM_KEYDOWN as usize {
+            KEYSTROKE_COUNTER.fetch_add(1, Ordering::SeqCst);
+        }
+        CallNextHookEx(HHOOK::default(), code, wparam, lparam)
+    }
+    
+    unsafe extern "system" fn mouse_proc(
+        code: i32,
+        wparam: WPARAM,
+        lparam: LPARAM
+    ) -> LRESULT {
+        if code >= 0 && (wparam.0 == WM_LBUTTONDOWN as usize || wparam.0 == WM_RBUTTONDOWN as usize) {
+            CLICK_COUNTER.fetch_add(1, Ordering::SeqCst);
+        }
+        CallNextHookEx(HHOOK::default(), code, wparam, lparam)
+    }
 }
 
 mod storage {
@@ -355,19 +546,30 @@ mod storage {
     use std::fs::{OpenOptions, metadata};
     use std::io::Write;
     
+    fn get_data_path() -> std::path::PathBuf {
+        // Always save in the same directory as the executable for portability
+        if let Ok(exe_path) = std::env::current_exe() {
+            if let Some(exe_dir) = exe_path.parent() {
+                return exe_dir.join("mytime_data.csv");
+            }
+        }
+        // Fallback to current directory
+        std::path::PathBuf::from("mytime_data.csv")
+    }
+    
     pub fn save_to_csv(entries: &[TimeEntry]) -> Result<(), Box<dyn std::error::Error>> {
-        let file_path = "mytime_data.csv";
-        let file_exists = metadata(file_path).is_ok();
+        let file_path = get_data_path();
+        let file_exists = metadata(&file_path).is_ok();
         
         let file = OpenOptions::new()
             .create(true)
             .truncate(false)
             .append(true)
-            .open(file_path)?;
+            .open(&file_path)?;
         
         // Write header if file is new
         if !file_exists {
-            writeln!(&file, "app_name,window_title,start_time,duration_seconds")?;
+            writeln!(&file, "app_name,window_title,start_time,end_time,duration_seconds,idle_seconds,keystrokes,mouse_clicks")?;
         }
         
         let mut wtr = csv::WriterBuilder::new()
@@ -384,6 +586,18 @@ mod storage {
 }
 
 fn main() -> Result<(), eframe::Error> {
+    // Check for single instance
+    unsafe {
+        let mutex_name = windows::core::w!("MyTimeAppMutex");
+        let mutex = CreateMutexW(None, true, mutex_name);
+        
+        if mutex.is_err() || windows::Win32::Foundation::GetLastError() == ERROR_ALREADY_EXISTS {
+            // Another instance is already running
+            eprintln!("MyTime is already running!");
+            return Ok(());
+        }
+    }
+    
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
             .with_inner_size([600.0, 400.0])
