@@ -74,6 +74,8 @@ struct FloatingTimerView: View {
 }
 
 class FloatingWindow: NSPanel {
+    static var sharedInstance: FloatingWindow?
+    
     override init(contentRect: NSRect, styleMask style: NSWindow.StyleMask, backing backingStoreType: NSWindow.BackingStoreType, defer flag: Bool) {
         super.init(contentRect: contentRect, styleMask: [.borderless, .nonactivatingPanel, .utilityWindow], backing: backingStoreType, defer: flag)
         
@@ -86,6 +88,12 @@ class FloatingWindow: NSPanel {
         self.becomesKeyOnlyIfNeeded = true
         self.isFloatingPanel = true
         self.acceptsMouseMovedEvents = true
+        
+        // Close any existing floating window
+        if let existing = FloatingWindow.sharedInstance {
+            existing.close()
+        }
+        FloatingWindow.sharedInstance = self
     }
     
     override var canBecomeKey: Bool {
@@ -94,5 +102,12 @@ class FloatingWindow: NSPanel {
     
     override var canBecomeMain: Bool {
         return false
+    }
+    
+    override func close() {
+        super.close()
+        if FloatingWindow.sharedInstance == self {
+            FloatingWindow.sharedInstance = nil
+        }
     }
 }

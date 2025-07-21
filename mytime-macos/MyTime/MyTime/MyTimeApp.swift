@@ -48,6 +48,10 @@ struct MyTimeApp: App {
                     ) { _ in
                         Task { @MainActor in
                             viewModel.stopTracking()
+                            // Clean up floating window
+                            if let window = FloatingWindow.sharedInstance {
+                                window.close()
+                            }
                         }
                     }
                 }
@@ -60,6 +64,11 @@ struct MyTimeApp: App {
     }
     
     func createFloatingTimer() {
+        // Close any existing floating window first
+        if let existingWindow = floatingWindow {
+            existingWindow.close()
+        }
+        
         let floatingView = FloatingTimerView()
             .environmentObject(viewModel)
         
@@ -75,6 +84,9 @@ struct MyTimeApp: App {
         window.center()
         window.orderFront(nil)
         window.isReleasedWhenClosed = false // Keep floating window alive
+        
+        // Store reference to the window
+        floatingWindow = window
         
         // Position it in the top-right corner, avoiding the notch
         if let screen = NSScreen.main {
