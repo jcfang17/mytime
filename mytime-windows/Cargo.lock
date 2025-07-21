@@ -2280,7 +2280,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "mytime"
+name = "mytime-win"
 version = "0.1.0"
 dependencies = [
  "chrono",

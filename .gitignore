@@ -1,0 +1,16 @@
+# IDE
+.idea/
+
+# Temporary/unknown directories
+mytime/
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Editor backups
+*.swp
+*.swo
+*~
+
+# Platform-specific builds are handled in their own .gitignore files
