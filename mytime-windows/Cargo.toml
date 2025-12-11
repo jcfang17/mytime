@@ -1,30 +1,25 @@
 [package]
 name = "mytime-win"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2021"
 
 [dependencies]
-# GUI framework for Windows
-eframe = "0.29"
-egui = "0.29"
-egui_plot = "0.29"
+# Native Windows GUI - mature, stable, proper Win32 integration
+native-windows-gui = "1.0"
+native-windows-derive = "1.0"
 
-# Windows API bindings
+# Windows API bindings for tracking
 windows = { version = "0.58", features = [
     "Win32_Foundation",
     "Win32_UI_WindowsAndMessaging",
     "Win32_System_Threading",
     "Win32_UI_Input_KeyboardAndMouse",
     "Win32_System_ProcessStatus",
-    "Win32_System_Diagnostics_ToolHelp",
     "Win32_System_SystemInformation",
     "Win32_Security",
     "Win32_System_Registry",
+    "Win32_UI_Shell",
 ] }
-
-# System tray
-tray-icon = "0.19"
-winit = "0.30"
 
 # Time handling
 chrono = { version = "0.4", features = ["serde"] }
@@ -33,5 +28,5 @@ chrono = { version = "0.4", features = ["serde"] }
 csv = "1.3"
 serde = { version = "1.0", features = ["derive"] }
 
-# Async runtime for background tasks
-tokio = { version = "1.41", features = ["full"] }
+[build-dependencies]
+winres = "0.1"

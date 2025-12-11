@@ -1,17 +1,17 @@
-#![windows_subsystem = "windows"] // Hide console window on Windows
+#![windows_subsystem = "windows"]
 
-use eframe::egui;
+extern crate native_windows_gui as nwg;
+extern crate native_windows_derive as nwd;
+
+use nwd::NwgUi;
+use nwg::NativeUi;
 use std::sync::{Arc, Mutex};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::{Duration, Instant};
+use std::collections::HashMap;
+use std::cell::RefCell;
 use chrono::{DateTime, Local};
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::mpsc;
-use windows::Win32::System::Threading::CreateMutexW;
-use windows::Win32::Foundation::ERROR_ALREADY_EXISTS;
-
-mod tray;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct TimeEntry {
@@ -25,271 +25,323 @@ struct TimeEntry {
     mouse_clicks: u64,
 }
 
-struct MyTimeApp {
-    is_tracking: bool,
-    current_session_start: Option<Instant>,
-    total_tracked_time: Duration,
+#[derive(Default, NwgUi)]
+pub struct MyTimeApp {
+    // Main window
+    #[nwg_control(size: (400, 300), position: (300, 300), title: "MyTime - Time Tracker", flags: "WINDOW|VISIBLE|MINIMIZE_BOX")]
+    #[nwg_events(OnWindowClose: [MyTimeApp::on_close], OnWindowMinimize: [MyTimeApp::on_minimize])]
+    window: nwg::Window,
+
+    // Layout
+    #[nwg_layout(parent: window, spacing: 5, margin: [10, 10, 10, 10])]
+    layout: nwg::GridLayout,
+
+    // Status label
+    #[nwg_control(text: "Status: Stopped", h_align: HTextAlign::Left)]
+    #[nwg_layout_item(layout: layout, row: 0, col: 0, col_span: 2)]
+    status_label: nwg::Label,
+
+    // Time label
+    #[nwg_control(text: "Total Time: 0h 0m 0s", h_align: HTextAlign::Left)]
+    #[nwg_layout_item(layout: layout, row: 1, col: 0, col_span: 2)]
+    time_label: nwg::Label,
+
+    // Start button
+    #[nwg_control(text: "Start")]
+    #[nwg_layout_item(layout: layout, row: 2, col: 0)]
+    #[nwg_events(OnButtonClick: [MyTimeApp::on_start])]
+    start_btn: nwg::Button,
+
+    // Stop button
+    #[nwg_control(text: "Stop")]
+    #[nwg_layout_item(layout: layout, row: 2, col: 1)]
+    #[nwg_events(OnButtonClick: [MyTimeApp::on_stop])]
+    stop_btn: nwg::Button,
+
+    // App usage list
+    #[nwg_control(list_style: nwg::ListViewStyle::Detailed, ex_flags: nwg::ListViewExFlags::GRID | nwg::ListViewExFlags::FULL_ROW_SELECT)]
+    #[nwg_layout_item(layout: layout, row: 3, col: 0, col_span: 2, row_span: 3)]
+    app_list: nwg::ListView,
+
+    // Timer for UI updates
+    #[nwg_control(interval: Duration::from_millis(1000))]
+    #[nwg_events(OnTimerTick: [MyTimeApp::on_timer])]
+    timer: nwg::AnimationTimer,
+
+    // Tray icon - use system icon
+    #[nwg_resource(source_system: Some(nwg::OemIcon::Information))]
+    tray_icon: nwg::Icon,
+
+    // Tray notification
+    #[nwg_control(icon: Some(&data.tray_icon), tip: Some("MyTime - Stopped"))]
+    #[nwg_events(MousePressLeftUp: [MyTimeApp::on_tray_click], OnContextMenu: [MyTimeApp::on_tray_right_click])]
+    tray: nwg::TrayNotification,
+
+    // Tray menu
+    #[nwg_control(parent: window, popup: true)]
+    tray_menu: nwg::Menu,
+
+    #[nwg_control(parent: tray_menu, text: "Show")]
+    #[nwg_events(OnMenuItemSelected: [MyTimeApp::on_show])]
+    tray_show: nwg::MenuItem,
+
+    #[nwg_control(parent: tray_menu, text: "Start Tracking")]
+    #[nwg_events(OnMenuItemSelected: [MyTimeApp::on_start])]
+    tray_start: nwg::MenuItem,
+
+    #[nwg_control(parent: tray_menu, text: "Stop Tracking")]
+    #[nwg_events(OnMenuItemSelected: [MyTimeApp::on_stop])]
+    tray_stop: nwg::MenuItem,
+
+    #[nwg_control(parent: tray_menu)]
+    tray_sep: nwg::MenuSeparator,
+
+    #[nwg_control(parent: tray_menu, text: "Start with Windows")]
+    #[nwg_events(OnMenuItemSelected: [MyTimeApp::on_toggle_autostart])]
+    tray_autostart: nwg::MenuItem,
+
+    #[nwg_control(parent: tray_menu)]
+    tray_sep2: nwg::MenuSeparator,
+
+    #[nwg_control(parent: tray_menu, text: "Exit")]
+    #[nwg_events(OnMenuItemSelected: [MyTimeApp::on_exit])]
+    tray_exit: nwg::MenuItem,
+
+    // State - stored as regular fields, not NWG controls
+    is_tracking: RefCell<bool>,
+    session_start: RefCell<Option<Instant>>,
+    total_time: RefCell<Duration>,
     time_entries: Arc<Mutex<Vec<TimeEntry>>>,
     app_usage: Arc<Mutex<HashMap<String, Duration>>>,
-    tracking_thread: Option<std::thread::JoinHandle<()>>,
-    should_quit: Arc<AtomicBool>,
     should_stop_tracking: Arc<AtomicBool>,
-    window_visible: bool,
-    tray_command_rx: Option<mpsc::Receiver<tray::TrayCommand>>,
-    tray_manager: Option<tray::TrayManager>,
-}
-
-impl Default for MyTimeApp {
-    fn default() -> Self {
-        Self {
-            is_tracking: false,
-            current_session_start: None,
-            total_tracked_time: Duration::default(),
-            time_entries: Arc::new(Mutex::new(Vec::new())),
-            app_usage: Arc::new(Mutex::new(HashMap::new())),
-            tracking_thread: None,
-            should_quit: Arc::new(AtomicBool::new(false)),
-            should_stop_tracking: Arc::new(AtomicBool::new(false)),
-            window_visible: true,
-            tray_command_rx: None,
-            tray_manager: None,
-        }
-    }
+    tracking_thread: RefCell<Option<std::thread::JoinHandle<()>>>,
 }
 
 impl MyTimeApp {
-    fn initialize_tray(&mut self, ctx: &egui::Context) {
-        if let Ok((tray_manager, tray_rx)) = tray::create_tray_icon(ctx.clone()) {
-            self.tray_manager = Some(tray_manager);
-            self.tray_command_rx = Some(tray_rx);
+    fn on_start(&self) {
+        if *self.is_tracking.borrow() {
+            return;
         }
+
+        *self.is_tracking.borrow_mut() = true;
+        *self.session_start.borrow_mut() = Some(Instant::now());
+        self.should_stop_tracking.store(false, Ordering::SeqCst);
+
+        self.status_label.set_text("Status: Tracking");
+        self.start_btn.set_enabled(false);
+        self.stop_btn.set_enabled(true);
+        self.tray_start.set_enabled(false);
+        self.tray_stop.set_enabled(true);
+        self.update_tray_icon(true);
+
+        // Start tracking thread
+        let entries = Arc::clone(&self.time_entries);
+        let app_usage = Arc::clone(&self.app_usage);
+        let stop_flag = Arc::clone(&self.should_stop_tracking);
+
+        let handle = std::thread::spawn(move || {
+            tracker::track_foreground_window(entries, app_usage, stop_flag);
+        });
+
+        *self.tracking_thread.borrow_mut() = Some(handle);
     }
 
-    fn start_tracking(&mut self) {
-        if !self.is_tracking {
-            // Stop any existing tracking thread first
-            if self.tracking_thread.is_some() {
-                self.stop_tracking();
-                // Wait a bit for thread to stop
-                std::thread::sleep(Duration::from_millis(200));
-            }
-            
-            self.is_tracking = true;
-            self.current_session_start = Some(Instant::now());
-            self.should_stop_tracking.store(false, Ordering::SeqCst);
-            
-            let entries = Arc::clone(&self.time_entries);
-            let app_usage = Arc::clone(&self.app_usage);
-            let stop_flag = Arc::clone(&self.should_stop_tracking);
-            
-            let handle = std::thread::spawn(move || {
-                tracker::track_foreground_window(entries, app_usage, stop_flag);
-            });
-            
-            self.tracking_thread = Some(handle);
+    fn on_stop(&self) {
+        if !*self.is_tracking.borrow() {
+            return;
         }
+
+        *self.is_tracking.borrow_mut() = false;
+        self.should_stop_tracking.store(true, Ordering::SeqCst);
+
+        if let Some(start) = self.session_start.borrow_mut().take() {
+            *self.total_time.borrow_mut() += start.elapsed();
+        }
+
+        // Wait for tracking thread
+        if let Some(handle) = self.tracking_thread.borrow_mut().take() {
+            let _ = handle.join();
+        }
+
+        // Save entries
+        if let Ok(mut entries) = self.time_entries.lock() {
+            if !entries.is_empty() {
+                storage::save_to_csv(&entries).ok();
+                entries.clear();
+            }
+        }
+
+        self.status_label.set_text("Status: Stopped");
+        self.start_btn.set_enabled(true);
+        self.stop_btn.set_enabled(false);
+        self.tray_start.set_enabled(true);
+        self.tray_stop.set_enabled(false);
+        self.update_tray_icon(false);
     }
-    
-    fn stop_tracking(&mut self) {
-        if self.is_tracking {
-            self.is_tracking = false;
-            self.should_stop_tracking.store(true, Ordering::SeqCst);
-            
-            if let Some(start) = self.current_session_start.take() {
-                self.total_tracked_time += start.elapsed();
-            }
-            
-            // Wait for tracking thread to finish
-            if let Some(handle) = self.tracking_thread.take() {
-                let _ = handle.join();
-            }
-            
-            if let Ok(mut entries) = self.time_entries.lock() {
-                if !entries.is_empty() {
-                    storage::save_to_csv(&entries).ok();
-                    entries.clear(); // Clear entries after saving to prevent duplicates
-                }
-            }
-        }
-    }
-}
 
-impl eframe::App for MyTimeApp {
-    fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
-        // Initialize tray on first run
-        if self.tray_manager.is_none() {
-            self.initialize_tray(ctx);
-        }
-
-        // Process tray commands first
-        let mut commands_to_process = Vec::new();
-        if let Some(ref rx) = self.tray_command_rx {
-            while let Ok(cmd) = rx.try_recv() {
-                commands_to_process.push(cmd);
-            }
-        }
-
-        // Process commands after releasing the borrow
-        for cmd in commands_to_process {
-            match cmd {
-                tray::TrayCommand::Show => {
-                    self.window_visible = true;
-                    ctx.send_viewport_cmd(egui::ViewportCommand::Visible(true));
-                    ctx.send_viewport_cmd(egui::ViewportCommand::Minimized(false));
-                    ctx.send_viewport_cmd(egui::ViewportCommand::Focus);
-                }
-                tray::TrayCommand::Start => {
-                    if !self.is_tracking {
-                        self.start_tracking();
-                    }
-                }
-                tray::TrayCommand::Stop => {
-                    if self.is_tracking {
-                        self.stop_tracking();
-                    }
-                }
-                tray::TrayCommand::Exit => {
-                    // Stop tracking before quitting
-                    if self.is_tracking {
-                        self.stop_tracking();
-                    }
-                    self.should_quit.store(true, Ordering::Relaxed);
-                }
-                tray::TrayCommand::ToggleAutoStart => {
-                    if let Some(ref mut tray_manager) = self.tray_manager {
-                        if let Err(e) = tray_manager.toggle_auto_start() {
-                            eprintln!("Failed to toggle auto-start: {}", e);
-                        }
-                    }
-                }
-            }
-        }
-
-        // Update tray status
-        if let Some(ref mut tray_manager) = self.tray_manager {
-            let current_duration = if let Some(start) = self.current_session_start {
-                self.total_tracked_time + start.elapsed()
+    fn on_timer(&self) {
+        let total = if *self.is_tracking.borrow() {
+            if let Some(start) = *self.session_start.borrow() {
+                *self.total_time.borrow() + start.elapsed()
             } else {
-                self.total_tracked_time
-            };
-
-            // Update tray status (ignore errors to avoid disrupting the app)
-            let _ = tray_manager.update_status(self.is_tracking, current_duration);
-        }
-
-        // Check if we should quit first
-        if self.should_quit.load(Ordering::Relaxed) {
-            // Stop tracking before quitting
-            if self.is_tracking {
-                self.stop_tracking();
+                *self.total_time.borrow()
             }
-            ctx.send_viewport_cmd(egui::ViewportCommand::Close);
-            return; // Exit early to avoid processing other events
-        }
+        } else {
+            *self.total_time.borrow()
+        };
 
-        // Handle window close event - minimize to tray instead of quitting (only if not quitting)
-        if ctx.input(|i| i.viewport().close_requested()) {
-            self.window_visible = false;
-            ctx.send_viewport_cmd(egui::ViewportCommand::Minimized(true));
-            // Don't actually close the window
-            ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
-        }
-        
-        egui::CentralPanel::default().show(ctx, |ui| {
-            ui.heading("MyTime - Time Tracker");
-            
-            ui.separator();
-            
-            ui.horizontal(|ui| {
-                // Start button - enabled only when not tracking
-                let start_button = egui::Button::new("▶ Start");
-                if ui.add_enabled(!self.is_tracking, start_button).clicked() {
-                    self.start_tracking();
+        let hours = total.as_secs() / 3600;
+        let minutes = (total.as_secs() % 3600) / 60;
+        let seconds = total.as_secs() % 60;
+
+        self.time_label.set_text(&format!("Total Time: {}h {}m {}s", hours, minutes, seconds));
+
+        // Update tray tooltip
+        let status = if *self.is_tracking.borrow() { "Tracking" } else { "Stopped" };
+        let tip = format!("MyTime - {} ({}h {}m {}s)", status, hours, minutes, seconds);
+        self.tray.set_tip(&tip);
+
+        // Update app list
+        self.update_app_list();
+    }
+
+    fn update_app_list(&self) {
+        if let Ok(usage) = self.app_usage.lock() {
+            // Only update if there's new data
+            let current_count = self.app_list.len();
+            if current_count != usage.len() || current_count == 0 {
+                self.app_list.clear();
+
+                // Ensure columns exist
+                if self.app_list.column_len() == 0 {
+                    self.app_list.insert_column("Application");
+                    self.app_list.insert_column("Time");
+                    self.app_list.set_column_width(0, 200);
+                    self.app_list.set_column_width(1, 100);
                 }
 
-                // Stop button - enabled only when tracking
-                let stop_button = egui::Button::new("⏸ Stop");
-                if ui.add_enabled(self.is_tracking, stop_button).clicked() {
-                    self.stop_tracking();
-                }
-
-                ui.separator();
-                ui.label(format!("Status: {}", if self.is_tracking { "Tracking" } else { "Stopped" }));
-            });
-
-            ui.separator();
-
-            // Add quit button
-            ui.horizontal(|ui| {
-                if ui.button("❌ Quit").clicked() {
-                    self.should_quit.store(true, Ordering::Relaxed);
-                }
-                ui.label("(Close window to minimize to tray)");
-            });
-            
-            ui.separator();
-            
-            let current_duration = if let Some(start) = self.current_session_start {
-                self.total_tracked_time + start.elapsed()
-            } else {
-                self.total_tracked_time
-            };
-            
-            ui.label(format!("Total Time: {} hours {} minutes {} seconds", 
-                current_duration.as_secs() / 3600,
-                (current_duration.as_secs() % 3600) / 60,
-                current_duration.as_secs() % 60
-            ));
-            
-            ui.separator();
-            
-            if ui.button("📊 Show Chart").clicked() {
-                self.show_chart(ui);
-            }
-            
-            if let Ok(app_usage) = self.app_usage.lock() {
-                if !app_usage.is_empty() {
-                    ui.separator();
-                    ui.heading("App Usage");
-                    
-                    egui::ScrollArea::vertical().show(ui, |ui| {
-                        for (app, duration) in app_usage.iter() {
-                            ui.label(format!("{}: {} min", 
-                                app, 
-                                duration.as_secs() / 60
-                            ));
-                        }
+                for (app, duration) in usage.iter() {
+                    let minutes = duration.as_secs() / 60;
+                    let secs = duration.as_secs() % 60;
+                    self.app_list.insert_item(nwg::InsertListViewItem {
+                        index: Some(0),
+                        column_index: 0,
+                        text: Some(app.clone()),
+                        image: None,
+                    });
+                    self.app_list.insert_item(nwg::InsertListViewItem {
+                        index: Some(0),
+                        column_index: 1,
+                        text: Some(format!("{}m {}s", minutes, secs)),
+                        image: None,
                     });
                 }
             }
-        });
-        
-        if self.is_tracking {
-            ctx.request_repaint_after(Duration::from_secs(1));
         }
     }
-}
 
-impl MyTimeApp {
-    fn show_chart(&self, ui: &mut egui::Ui) {
-        use egui_plot::{Bar, BarChart, Plot};
-        
-        if let Ok(app_usage) = self.app_usage.lock() {
-            let bars: Vec<Bar> = app_usage
-                .iter()
-                .enumerate()
-                .map(|(i, (app, duration))| {
-                    Bar::new(i as f64, duration.as_secs() as f64 / 60.0)
-                        .name(app)
-                })
-                .collect();
-            
-            let chart = BarChart::new(bars);
-            
-            Plot::new("app_usage_chart")
-                .view_aspect(2.0)
-                .show(ui, |plot_ui| plot_ui.bar_chart(chart));
+    fn update_tray_icon(&self, tracking: bool) {
+        // Update tray tip immediately
+        let status = if tracking { "Tracking" } else { "Stopped" };
+        self.tray.set_tip(&format!("MyTime - {}", status));
+    }
+
+    fn on_minimize(&self) {
+        self.window.set_visible(false);
+    }
+
+    fn on_close(&self) {
+        // Minimize to tray instead of closing
+        self.window.set_visible(false);
+    }
+
+    fn on_show(&self) {
+        self.window.set_visible(true);
+        self.window.set_focus();
+    }
+
+    fn on_tray_click(&self) {
+        self.on_show();
+    }
+
+    fn on_tray_right_click(&self) {
+        let (x, y) = nwg::GlobalCursor::position();
+        self.tray_menu.popup(x, y);
+    }
+
+    fn on_exit(&self) {
+        // Stop tracking if active
+        if *self.is_tracking.borrow() {
+            self.on_stop();
         }
+        nwg::stop_thread_dispatch();
+    }
+
+    fn on_toggle_autostart(&self) {
+        use windows::Win32::System::Registry::*;
+
+        let is_enabled = self.tray_autostart.checked();
+
+        unsafe {
+            let key_path = windows::core::w!("SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Run");
+            let mut key: HKEY = HKEY::default();
+
+            if RegOpenKeyExW(HKEY_CURRENT_USER, key_path, 0, KEY_WRITE, &mut key).is_err() {
+                nwg::modal_info_message(&self.window, "Error", "Failed to open registry key");
+                // Revert checkbox state
+                self.tray_autostart.set_checked(!is_enabled);
+                return;
+            }
+
+            let value_name = windows::core::w!("MyTime");
+
+            if is_enabled {
+                // Was just checked, so enable auto-start
+                if let Ok(exe_path) = std::env::current_exe() {
+                    if let Some(path_str) = exe_path.to_str() {
+                        let path_wide: Vec<u16> = path_str.encode_utf16().chain(std::iter::once(0)).collect();
+                        let byte_ptr = path_wide.as_ptr() as *const u8;
+                        let byte_len = path_wide.len() * 2;
+
+                        let _ = RegSetValueExW(
+                            key,
+                            value_name,
+                            0,
+                            REG_SZ,
+                            Some(std::slice::from_raw_parts(byte_ptr, byte_len)),
+                        );
+                    }
+                }
+            } else {
+                // Was just unchecked, so disable auto-start
+                let _ = RegDeleteValueW(key, value_name);
+            }
+
+            let _ = RegCloseKey(key);
+        }
+    }
+
+    fn is_autostart_enabled() -> bool {
+        use windows::Win32::System::Registry::*;
+
+        unsafe {
+            let key_path = windows::core::w!("SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Run");
+            let mut key: HKEY = HKEY::default();
+
+            if RegOpenKeyExW(HKEY_CURRENT_USER, key_path, 0, KEY_READ, &mut key).is_err() {
+                return false;
+            }
+
+            let value_name = windows::core::w!("MyTime");
+            let result = RegQueryValueExW(key, value_name, None, None, None, None);
+            let _ = RegCloseKey(key);
+
+            result.is_ok()
+        }
+    }
+
+    fn init_autostart_menu(&self) {
+        self.tray_autostart.set_checked(Self::is_autostart_enabled());
     }
 }
 
@@ -303,49 +355,37 @@ mod tracker {
     use windows::Win32::System::Threading::*;
     use std::ffi::OsString;
     use std::os::windows::ffi::OsStringExt;
-    
-    const IDLE_THRESHOLD_MS: u32 = 30000; // 30 seconds
-    
+
+    const IDLE_THRESHOLD_MS: u32 = 30000;
+
+    static KEYSTROKE_COUNTER: AtomicU64 = AtomicU64::new(0);
+    static CLICK_COUNTER: AtomicU64 = AtomicU64::new(0);
+
     pub fn track_foreground_window(
         entries: Arc<Mutex<Vec<TimeEntry>>>,
         app_usage: Arc<Mutex<HashMap<String, Duration>>>,
-        should_stop: Arc<AtomicBool>
+        should_stop: Arc<AtomicBool>,
     ) {
         let mut last_window_info: Option<(String, String)> = None;
         let mut window_start_time = Instant::now();
         let mut last_activity_check = Instant::now();
         let mut idle_time_accumulated = Duration::ZERO;
-        let mut _keystrokes = 0u64;
-        let mut _mouse_clicks = 0u64;
-        
-        // Reset counters for this tracking session
+
         KEYSTROKE_COUNTER.store(0, Ordering::SeqCst);
         CLICK_COUNTER.store(0, Ordering::SeqCst);
-        
-        // Use global static counters instead of thread-local
-        static KEYSTROKE_COUNTER: AtomicU64 = AtomicU64::new(0);
-        static CLICK_COUNTER: AtomicU64 = AtomicU64::new(0);
-        
-        // Start activity monitoring thread only once globally
+
         static ACTIVITY_MONITOR_STARTED: std::sync::Once = std::sync::Once::new();
         ACTIVITY_MONITOR_STARTED.call_once(|| {
-            std::thread::spawn(|| {
-                monitor_activity();
-            });
+            std::thread::spawn(monitor_activity);
         });
-        
+
         loop {
-            // Check if we should stop
             if should_stop.load(Ordering::SeqCst) {
-                // Save final entry before stopping
                 if let Some((last_app, last_title)) = last_window_info {
                     let duration = Instant::now() - window_start_time;
                     let start_time = Local::now() - chrono::Duration::seconds(duration.as_secs() as i64);
                     let end_time = Local::now();
-                    
-                    let ks = KEYSTROKE_COUNTER.swap(0, Ordering::SeqCst);
-                    let mc = CLICK_COUNTER.swap(0, Ordering::SeqCst);
-                    
+
                     let entry = TimeEntry {
                         app_name: last_app,
                         window_title: last_title,
@@ -353,20 +393,19 @@ mod tracker {
                         end_time,
                         duration_seconds: duration.as_secs(),
                         idle_seconds: idle_time_accumulated.as_secs(),
-                        keystrokes: ks,
-                        mouse_clicks: mc,
+                        keystrokes: KEYSTROKE_COUNTER.swap(0, Ordering::SeqCst),
+                        mouse_clicks: CLICK_COUNTER.swap(0, Ordering::SeqCst),
                     };
-                    
+
                     if let Ok(mut entries_lock) = entries.lock() {
                         entries_lock.push(entry);
                     }
                 }
                 break;
             }
-            
+
             let now = Instant::now();
-            
-            // Check idle time
+
             if now - last_activity_check >= Duration::from_secs(1) {
                 if let Some(idle_ms) = get_idle_time() {
                     if idle_ms > IDLE_THRESHOLD_MS {
@@ -375,21 +414,16 @@ mod tracker {
                 }
                 last_activity_check = now;
             }
-            
+
             if let Some((app_name, window_title)) = get_foreground_window_info() {
                 let current_info = (app_name.clone(), window_title.clone());
-                
+
                 if last_window_info.as_ref() != Some(&current_info) {
-                    // Window changed, save the previous entry
                     if let Some((last_app, last_title)) = last_window_info {
                         let duration = now - window_start_time;
                         let start_time = Local::now() - chrono::Duration::seconds(duration.as_secs() as i64);
                         let end_time = Local::now();
-                        
-                        // Get activity counts from global counters
-                        let ks = KEYSTROKE_COUNTER.swap(0, Ordering::SeqCst);
-                        let mc = CLICK_COUNTER.swap(0, Ordering::SeqCst);
-                        
+
                         let entry = TimeEntry {
                             app_name: last_app.clone(),
                             window_title: last_title,
@@ -397,39 +431,36 @@ mod tracker {
                             end_time,
                             duration_seconds: duration.as_secs(),
                             idle_seconds: idle_time_accumulated.as_secs(),
-                            keystrokes: ks,
-                            mouse_clicks: mc,
+                            keystrokes: KEYSTROKE_COUNTER.swap(0, Ordering::SeqCst),
+                            mouse_clicks: CLICK_COUNTER.swap(0, Ordering::SeqCst),
                         };
-                        
+
                         if let Ok(mut entries_lock) = entries.lock() {
                             entries_lock.push(entry);
                         }
-                        
+
                         if let Ok(mut usage) = app_usage.lock() {
                             *usage.entry(last_app).or_insert(Duration::ZERO) += duration;
                         }
                     }
-                    
-                    // Reset for new window
+
                     last_window_info = Some(current_info);
                     window_start_time = now;
                     idle_time_accumulated = Duration::ZERO;
-                    _keystrokes = 0;
-                    _mouse_clicks = 0;
                 }
             }
-            
+
             std::thread::sleep(Duration::from_millis(100));
         }
     }
-    
+
     fn get_idle_time() -> Option<u32> {
         unsafe {
             let mut last_input = LASTINPUTINFO {
                 cbSize: std::mem::size_of::<LASTINPUTINFO>() as u32,
                 dwTime: 0,
             };
-            
+
             if GetLastInputInfo(&mut last_input).as_bool() {
                 let current_tick = GetTickCount64() as u32;
                 Some(current_tick - last_input.dwTime)
@@ -438,33 +469,31 @@ mod tracker {
             }
         }
     }
-    
+
     fn monitor_activity() {
         unsafe {
-            // Set up keyboard hook
             let keyboard_hook = SetWindowsHookExW(
                 WH_KEYBOARD_LL,
                 Some(keyboard_proc),
                 HINSTANCE::default(),
-                0
-            ).ok();
-            
-            // Set up mouse hook  
+                0,
+            )
+            .ok();
+
             let mouse_hook = SetWindowsHookExW(
                 WH_MOUSE_LL,
                 Some(mouse_proc),
                 HINSTANCE::default(),
-                0
-            ).ok();
-            
-            // Message loop
+                0,
+            )
+            .ok();
+
             let mut msg = MSG::default();
             while GetMessageW(&mut msg, HWND::default(), 0, 0).as_bool() {
                 let _ = TranslateMessage(&msg);
                 DispatchMessageW(&msg);
             }
-            
-            // Cleanup
+
             if let Some(hook) = keyboard_hook {
                 let _ = UnhookWindowsHookEx(hook);
             }
@@ -473,67 +502,49 @@ mod tracker {
             }
         }
     }
-    
+
     fn get_foreground_window_info() -> Option<(String, String)> {
         unsafe {
             let hwnd = GetForegroundWindow();
             if hwnd.is_invalid() {
                 return None;
             }
-            
+
             let mut title_buf = vec![0u16; 512];
             let title_len = GetWindowTextW(hwnd, &mut title_buf);
             let window_title = OsString::from_wide(&title_buf[..title_len as usize])
                 .to_string_lossy()
                 .to_string();
-            
+
             let mut process_id = 0u32;
             GetWindowThreadProcessId(hwnd, Some(&mut process_id));
-            
+
             let process = OpenProcess(PROCESS_QUERY_INFORMATION | PROCESS_VM_READ, false, process_id).ok()?;
-            
+
             let mut exe_buf = vec![0u16; 512];
             let result = GetModuleFileNameExW(process, HMODULE::default(), &mut exe_buf);
-            
-            // Find the actual length by looking for null terminator
+
             let actual_len = exe_buf.iter().position(|&c| c == 0).unwrap_or(result as usize);
-            
             let exe_path = OsString::from_wide(&exe_buf[..actual_len])
                 .to_string_lossy()
                 .to_string();
-            
-            let app_name = exe_path
-                .split('\\')
-                .last()
-                .unwrap_or("Unknown")
-                .to_string();
-            
+
+            let app_name = exe_path.split('\\').last().unwrap_or("Unknown").to_string();
+
             CloseHandle(process).ok();
-            
+
             Some((app_name, window_title))
         }
     }
-    
-    // Global static counters for activity monitoring
-    static KEYSTROKE_COUNTER: AtomicU64 = AtomicU64::new(0);
-    static CLICK_COUNTER: AtomicU64 = AtomicU64::new(0);
-    
-    unsafe extern "system" fn keyboard_proc(
-        code: i32,
-        wparam: WPARAM,
-        lparam: LPARAM
-    ) -> LRESULT {
+
+    unsafe extern "system" fn keyboard_proc(code: i32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
         if code >= 0 && wparam.0 == WM_KEYDOWN as usize {
             KEYSTROKE_COUNTER.fetch_add(1, Ordering::SeqCst);
         }
         CallNextHookEx(HHOOK::default(), code, wparam, lparam)
     }
-    
-    unsafe extern "system" fn mouse_proc(
-        code: i32,
-        wparam: WPARAM,
-        lparam: LPARAM
-    ) -> LRESULT {
+
+    unsafe extern "system" fn mouse_proc(code: i32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
         if code >= 0 && (wparam.0 == WM_LBUTTONDOWN as usize || wparam.0 == WM_RBUTTONDOWN as usize) {
             CLICK_COUNTER.fetch_add(1, Ordering::SeqCst);
         }
@@ -543,74 +554,88 @@ mod tracker {
 
 mod storage {
     use super::*;
-    use std::fs::{OpenOptions, metadata};
+    use std::fs::{metadata, OpenOptions};
     use std::io::Write;
-    
+
     fn get_data_path() -> std::path::PathBuf {
-        // Always save in the same directory as the executable for portability
         if let Ok(exe_path) = std::env::current_exe() {
             if let Some(exe_dir) = exe_path.parent() {
                 return exe_dir.join("mytime_data.csv");
             }
         }
-        // Fallback to current directory
         std::path::PathBuf::from("mytime_data.csv")
     }
-    
+
     pub fn save_to_csv(entries: &[TimeEntry]) -> Result<(), Box<dyn std::error::Error>> {
         let file_path = get_data_path();
         let file_exists = metadata(&file_path).is_ok();
-        
+
         let file = OpenOptions::new()
             .create(true)
             .truncate(false)
             .append(true)
             .open(&file_path)?;
-        
-        // Write header if file is new
+
         if !file_exists {
-            writeln!(&file, "app_name,window_title,start_time,end_time,duration_seconds,idle_seconds,keystrokes,mouse_clicks")?;
+            writeln!(
+                &file,
+                "app_name,window_title,start_time,end_time,duration_seconds,idle_seconds,keystrokes,mouse_clicks"
+            )?;
         }
-        
+
         let mut wtr = csv::WriterBuilder::new()
             .has_headers(false)
             .from_writer(file);
-        
+
         for entry in entries {
             wtr.serialize(entry)?;
         }
-        
+
         wtr.flush()?;
         Ok(())
     }
 }
 
-fn main() -> Result<(), eframe::Error> {
-    // Check for single instance
+fn main() {
+    // Single instance check
     unsafe {
+        use windows::Win32::System::Threading::CreateMutexW;
+        use windows::Win32::Foundation::{ERROR_ALREADY_EXISTS, GetLastError};
+
         let mutex_name = windows::core::w!("MyTimeAppMutex");
         let mutex = CreateMutexW(None, true, mutex_name);
-        
-        if mutex.is_err() || windows::Win32::Foundation::GetLastError() == ERROR_ALREADY_EXISTS {
-            // Another instance is already running
-            eprintln!("MyTime is already running!");
-            return Ok(());
+
+        if mutex.is_err() || GetLastError() == ERROR_ALREADY_EXISTS {
+            return;
         }
     }
-    
-    let options = eframe::NativeOptions {
-        viewport: egui::ViewportBuilder::default()
-            .with_inner_size([600.0, 400.0])
-            .with_min_inner_size([400.0, 300.0])
-            .with_visible(true),
+
+    // Enable modern visual styles
+    nwg::enable_visual_styles();
+
+    nwg::init().expect("Failed to init Native Windows GUI");
+    nwg::Font::set_global_family("Segoe UI").expect("Failed to set default font");
+
+    let app = MyTimeApp {
+        is_tracking: RefCell::new(false),
+        session_start: RefCell::new(None),
+        total_time: RefCell::new(Duration::ZERO),
+        time_entries: Arc::new(Mutex::new(Vec::new())),
+        app_usage: Arc::new(Mutex::new(HashMap::new())),
+        should_stop_tracking: Arc::new(AtomicBool::new(false)),
+        tracking_thread: RefCell::new(None),
         ..Default::default()
     };
 
-    let app = MyTimeApp::default();
+    let ui = MyTimeApp::build_ui(app).expect("Failed to build UI");
 
-    eframe::run_native(
-        "MyTime",
-        options,
-        Box::new(|_cc| Ok(Box::new(app))),
-    )
+    // Initialize UI state
+    ui.stop_btn.set_enabled(false);
+    ui.tray_stop.set_enabled(false);
+    ui.init_autostart_menu();
+
+    // Start the timer
+    ui.timer.start();
+
+    nwg::dispatch_thread_events();
 }
