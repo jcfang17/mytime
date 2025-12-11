@@ -25,6 +25,29 @@ struct TimeEntry {
     mouse_clicks: u64,
 }
 
+#[derive(Debug, Clone, Default)]
+struct AppStats {
+    duration: Duration,
+    idle_seconds: u64,
+    keystrokes: u64,
+    mouse_clicks: u64,
+}
+
+impl AppStats {
+    fn is_likely_idle(&self) -> bool {
+        let duration_secs = self.duration.as_secs();
+        if duration_secs < 60 {
+            return false; // Too short to judge
+        }
+
+        let idle_ratio = self.idle_seconds as f64 / duration_secs as f64;
+        let has_minimal_input = self.keystrokes < 5 && self.mouse_clicks < 5;
+
+        // Likely idle if: >80% idle time AND almost no input
+        idle_ratio > 0.8 && has_minimal_input
+    }
+}
+
 #[derive(Default, NwgUi)]
 pub struct MyTimeApp {
     // Fonts
@@ -70,8 +93,14 @@ pub struct MyTimeApp {
 
     // Section label
     #[nwg_control(text: "Application Usage", font: Some(&data.font_normal))]
-    #[nwg_layout_item(layout: layout, row: 3, col: 0, col_span: 2)]
+    #[nwg_layout_item(layout: layout, row: 3, col: 0)]
     section_label: nwg::Label,
+
+    // Hide idle checkbox
+    #[nwg_control(text: "Hide idle", font: Some(&data.font_normal), check_state: nwg::CheckBoxState::Checked)]
+    #[nwg_layout_item(layout: layout, row: 3, col: 1)]
+    #[nwg_events(OnButtonClick: [MyTimeApp::on_toggle_hide_idle])]
+    hide_idle_checkbox: nwg::CheckBox,
 
     // App usage list
     #[nwg_control(list_style: nwg::ListViewStyle::Detailed, ex_flags: nwg::ListViewExFlags::GRID | nwg::ListViewExFlags::FULL_ROW_SELECT)]
@@ -127,9 +156,10 @@ pub struct MyTimeApp {
     session_start: RefCell<Option<Instant>>,
     total_time: RefCell<Duration>,
     time_entries: Arc<Mutex<Vec<TimeEntry>>>,
-    app_usage: Arc<Mutex<HashMap<String, Duration>>>,
+    app_usage: Arc<Mutex<HashMap<String, AppStats>>>,
     should_stop_tracking: Arc<AtomicBool>,
     tracking_thread: RefCell<Option<std::thread::JoinHandle<()>>>,
+    hide_idle_sessions: RefCell<bool>,
 }
 
 impl MyTimeApp {
@@ -222,24 +252,31 @@ impl MyTimeApp {
     }
 
     fn update_app_list(&self) {
+        let hide_idle = *self.hide_idle_sessions.borrow();
+
         if let Ok(usage) = self.app_usage.lock() {
             // Filter and transform the data
-            let mut filtered: Vec<(String, Duration)> = usage
+            let mut filtered: Vec<(String, Duration, bool)> = usage
                 .iter()
-                .filter(|(app, duration)| {
+                .filter(|(app, stats)| {
                     // Filter out noise: short entries and system processes
                     let app_lower = app.to_lowercase();
-                    duration.as_secs() >= 5
+                    stats.duration.as_secs() >= 5
                         && !app_lower.contains("explorer.exe")
                         && !app_lower.contains("mytime")
                         && !app_lower.contains("searchhost")
                         && !app_lower.contains("shellexperiencehost")
                         && !app_lower.contains("applicationframehost")
                 })
-                .map(|(app, duration)| {
+                .filter(|(_, stats)| {
+                    // Optionally filter out idle sessions
+                    !hide_idle || !stats.is_likely_idle()
+                })
+                .map(|(app, stats)| {
                     // Convert to friendly name (remove .exe, capitalize)
                     let friendly_name = Self::to_friendly_name(app);
-                    (friendly_name, *duration)
+                    let is_idle = stats.is_likely_idle();
+                    (friendly_name, stats.duration, is_idle)
                 })
                 .collect();
 
@@ -255,22 +292,33 @@ impl MyTimeApp {
                 if self.app_list.column_len() == 0 {
                     self.app_list.insert_column("Application");
                     self.app_list.insert_column("Time");
-                    self.app_list.set_column_width(0, 250);
-                    self.app_list.set_column_width(1, 120);
+                    self.app_list.insert_column("Status");
+                    self.app_list.set_column_width(0, 200);
+                    self.app_list.set_column_width(1, 100);
+                    self.app_list.set_column_width(2, 80);
                 }
 
-                for (app, duration) in filtered.iter() {
+                for (app, duration, is_idle) in filtered.iter() {
                     let time_str = Self::format_duration(*duration);
+                    let status = if *is_idle { "💤 Idle" } else { "✓ Active" };
+                    let row_idx = self.app_list.len() as i32;
+
                     self.app_list.insert_item(nwg::InsertListViewItem {
-                        index: Some(self.app_list.len() as i32),
+                        index: Some(row_idx),
                         column_index: 0,
                         text: Some(app.clone()),
                         image: None,
                     });
                     self.app_list.insert_item(nwg::InsertListViewItem {
-                        index: Some(self.app_list.len() as i32 - 1),
+                        index: Some(row_idx),
                         column_index: 1,
                         text: Some(time_str),
+                        image: None,
+                    });
+                    self.app_list.insert_item(nwg::InsertListViewItem {
+                        index: Some(row_idx),
+                        column_index: 2,
+                        text: Some(status.to_string()),
                         image: None,
                     });
                 }
@@ -373,6 +421,20 @@ impl MyTimeApp {
         nwg::stop_thread_dispatch();
     }
 
+    fn on_toggle_hide_idle(&self) {
+        let checked = self.hide_idle_checkbox.check_state() == nwg::CheckBoxState::Checked;
+        *self.hide_idle_sessions.borrow_mut() = checked;
+        // Force refresh the app list
+        self.app_list.clear();
+        if self.app_list.column_len() > 0 {
+            // Remove existing columns to force rebuild
+            while self.app_list.column_len() > 0 {
+                self.app_list.remove_column(0);
+            }
+        }
+        self.update_app_list();
+    }
+
     fn on_toggle_autostart(&self) {
         use windows::Win32::System::Registry::*;
 
@@ -459,7 +521,7 @@ mod tracker {
 
     pub fn track_foreground_window(
         entries: Arc<Mutex<Vec<TimeEntry>>>,
-        app_usage: Arc<Mutex<HashMap<String, Duration>>>,
+        app_usage: Arc<Mutex<HashMap<String, AppStats>>>,
         should_stop: Arc<AtomicBool>,
     ) {
         let mut last_window_info: Option<(String, String)> = None;
@@ -520,15 +582,19 @@ mod tracker {
                         let start_time = Local::now() - chrono::Duration::seconds(duration.as_secs() as i64);
                         let end_time = Local::now();
 
+                        let keystrokes = KEYSTROKE_COUNTER.swap(0, Ordering::SeqCst);
+                        let mouse_clicks = CLICK_COUNTER.swap(0, Ordering::SeqCst);
+                        let idle_secs = idle_time_accumulated.as_secs();
+
                         let entry = TimeEntry {
                             app_name: last_app.clone(),
                             window_title: last_title,
                             start_time,
                             end_time,
                             duration_seconds: duration.as_secs(),
-                            idle_seconds: idle_time_accumulated.as_secs(),
-                            keystrokes: KEYSTROKE_COUNTER.swap(0, Ordering::SeqCst),
-                            mouse_clicks: CLICK_COUNTER.swap(0, Ordering::SeqCst),
+                            idle_seconds: idle_secs,
+                            keystrokes,
+                            mouse_clicks,
                         };
 
                         if let Ok(mut entries_lock) = entries.lock() {
@@ -536,7 +602,11 @@ mod tracker {
                         }
 
                         if let Ok(mut usage) = app_usage.lock() {
-                            *usage.entry(last_app).or_insert(Duration::ZERO) += duration;
+                            let stats = usage.entry(last_app).or_default();
+                            stats.duration += duration;
+                            stats.idle_seconds += idle_secs;
+                            stats.keystrokes += keystrokes;
+                            stats.mouse_clicks += mouse_clicks;
                         }
                     }
 
@@ -720,6 +790,7 @@ fn main() {
         app_usage: Arc::new(Mutex::new(HashMap::new())),
         should_stop_tracking: Arc::new(AtomicBool::new(false)),
         tracking_thread: RefCell::new(None),
+        hide_idle_sessions: RefCell::new(true), // Default: hide idle sessions
         ..Default::default()
     };
 
