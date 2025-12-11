@@ -27,24 +27,54 @@ struct TimeEntry {
 
 #[derive(Debug, Clone, Default)]
 struct AppStats {
-    duration: Duration,
-    idle_seconds: u64,
-    keystrokes: u64,
-    mouse_clicks: u64,
+    // Active time - sessions that passed activity threshold
+    active_duration: Duration,
+    active_keystrokes: u64,
+    active_clicks: u64,
+    // Idle time - sessions that failed activity threshold
+    idle_duration: Duration,
+    // Session counts for potential future use
+    active_sessions: u32,
+    idle_sessions: u32,
 }
 
 impl AppStats {
-    fn is_likely_idle(&self) -> bool {
-        let duration_secs = self.duration.as_secs();
+    /// Check if a single session is likely idle
+    /// Call this BEFORE aggregating to decide which bucket the session goes into
+    fn is_session_idle(duration_secs: u64, idle_secs: u64, keystrokes: u64, mouse_clicks: u64) -> bool {
         if duration_secs < 60 {
-            return false; // Too short to judge
+            return false; // Too short to judge, treat as active
         }
 
-        let idle_ratio = self.idle_seconds as f64 / duration_secs as f64;
-        let has_minimal_input = self.keystrokes < 5 && self.mouse_clicks < 5;
+        let idle_ratio = idle_secs as f64 / duration_secs as f64;
+        let has_minimal_input = keystrokes < 5 && mouse_clicks < 5;
 
         // Likely idle if: >80% idle time AND almost no input
         idle_ratio > 0.8 && has_minimal_input
+    }
+
+    /// Add a session to the appropriate bucket based on activity
+    fn add_session(&mut self, duration: Duration, idle_secs: u64, keystrokes: u64, mouse_clicks: u64) {
+        let is_idle = Self::is_session_idle(duration.as_secs(), idle_secs, keystrokes, mouse_clicks);
+
+        if is_idle {
+            self.idle_duration += duration;
+            self.idle_sessions += 1;
+        } else {
+            self.active_duration += duration;
+            self.active_keystrokes += keystrokes;
+            self.active_clicks += mouse_clicks;
+            self.active_sessions += 1;
+        }
+    }
+
+    fn total_duration(&self) -> Duration {
+        self.active_duration + self.idle_duration
+    }
+
+    #[allow(dead_code)]
+    fn has_idle_time(&self) -> bool {
+        self.idle_duration.as_secs() > 0
     }
 }
 
@@ -96,8 +126,8 @@ pub struct MyTimeApp {
     #[nwg_layout_item(layout: layout, row: 3, col: 0)]
     section_label: nwg::Label,
 
-    // Hide idle checkbox
-    #[nwg_control(text: "Hide idle", font: Some(&data.font_normal), check_state: nwg::CheckBoxState::Checked)]
+    // Active time only checkbox
+    #[nwg_control(text: "Active only", font: Some(&data.font_normal), check_state: nwg::CheckBoxState::Checked)]
     #[nwg_layout_item(layout: layout, row: 3, col: 1)]
     #[nwg_events(OnButtonClick: [MyTimeApp::on_toggle_hide_idle])]
     hide_idle_checkbox: nwg::CheckBox,
@@ -252,35 +282,40 @@ impl MyTimeApp {
     }
 
     fn update_app_list(&self) {
-        let hide_idle = *self.hide_idle_sessions.borrow();
+        let show_all_time = !*self.hide_idle_sessions.borrow(); // Checkbox unchecked = show all
 
         if let Ok(usage) = self.app_usage.lock() {
             // Filter and transform the data
-            let mut filtered: Vec<(String, Duration, bool)> = usage
+            // Each entry: (friendly_name, display_duration, active_duration, idle_duration)
+            let mut filtered: Vec<(String, Duration, Duration, Duration)> = usage
                 .iter()
-                .filter(|(app, stats)| {
-                    // Filter out noise: short entries and system processes
+                .filter(|(app, _)| {
+                    // Filter out system processes
                     let app_lower = app.to_lowercase();
-                    stats.duration.as_secs() >= 5
-                        && !app_lower.contains("explorer.exe")
+                    !app_lower.contains("explorer.exe")
                         && !app_lower.contains("mytime")
                         && !app_lower.contains("searchhost")
                         && !app_lower.contains("shellexperiencehost")
                         && !app_lower.contains("applicationframehost")
                 })
                 .filter(|(_, stats)| {
-                    // Optionally filter out idle sessions
-                    !hide_idle || !stats.is_likely_idle()
+                    // Must have some active time (at least 5 seconds) OR showing all time
+                    stats.active_duration.as_secs() >= 5 || (show_all_time && stats.total_duration().as_secs() >= 5)
                 })
                 .map(|(app, stats)| {
-                    // Convert to friendly name (remove .exe, capitalize)
                     let friendly_name = Self::to_friendly_name(app);
-                    let is_idle = stats.is_likely_idle();
-                    (friendly_name, stats.duration, is_idle)
+                    // Show active time by default, total time if toggle is unchecked
+                    let display_duration = if show_all_time {
+                        stats.total_duration()
+                    } else {
+                        stats.active_duration
+                    };
+                    (friendly_name, display_duration, stats.active_duration, stats.idle_duration)
                 })
+                .filter(|(_, display, _, _)| display.as_secs() >= 5) // Filter out zero/tiny display times
                 .collect();
 
-            // Sort by duration (most used first)
+            // Sort by display duration (most used first)
             filtered.sort_by(|a, b| b.1.cmp(&a.1));
 
             // Only update if there's new data
@@ -291,16 +326,20 @@ impl MyTimeApp {
                 // Ensure columns exist
                 if self.app_list.column_len() == 0 {
                     self.app_list.insert_column("Application");
-                    self.app_list.insert_column("Time");
-                    self.app_list.insert_column("Status");
-                    self.app_list.set_column_width(0, 200);
-                    self.app_list.set_column_width(1, 100);
+                    self.app_list.insert_column("Active");
+                    self.app_list.insert_column("Idle");
+                    self.app_list.set_column_width(0, 180);
+                    self.app_list.set_column_width(1, 80);
                     self.app_list.set_column_width(2, 80);
                 }
 
-                for (app, duration, is_idle) in filtered.iter() {
-                    let time_str = Self::format_duration(*duration);
-                    let status = if *is_idle { "💤 Idle" } else { "✓ Active" };
+                for (app, _display, active, idle) in filtered.iter() {
+                    let active_str = Self::format_duration(*active);
+                    let idle_str = if idle.as_secs() > 0 {
+                        format!("💤 {}", Self::format_duration(*idle))
+                    } else {
+                        "-".to_string()
+                    };
                     let row_idx = self.app_list.len() as i32;
 
                     self.app_list.insert_item(nwg::InsertListViewItem {
@@ -312,13 +351,13 @@ impl MyTimeApp {
                     self.app_list.insert_item(nwg::InsertListViewItem {
                         index: Some(row_idx),
                         column_index: 1,
-                        text: Some(time_str),
+                        text: Some(active_str),
                         image: None,
                     });
                     self.app_list.insert_item(nwg::InsertListViewItem {
                         index: Some(row_idx),
                         column_index: 2,
-                        text: Some(status.to_string()),
+                        text: Some(idle_str),
                         image: None,
                     });
                 }
@@ -603,10 +642,7 @@ mod tracker {
 
                         if let Ok(mut usage) = app_usage.lock() {
                             let stats = usage.entry(last_app).or_default();
-                            stats.duration += duration;
-                            stats.idle_seconds += idle_secs;
-                            stats.keystrokes += keystrokes;
-                            stats.mouse_clicks += mouse_clicks;
+                            stats.add_session(duration, idle_secs, keystrokes, mouse_clicks);
                         }
                     }
 
