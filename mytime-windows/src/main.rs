@@ -27,40 +27,55 @@ struct TimeEntry {
 
 #[derive(Default, NwgUi)]
 pub struct MyTimeApp {
+    // Fonts
+    #[nwg_resource(family: "Segoe UI", size: 18, weight: 600)]
+    font_title: nwg::Font,
+
+    #[nwg_resource(family: "Segoe UI", size: 28, weight: 700)]
+    font_time: nwg::Font,
+
+    #[nwg_resource(family: "Segoe UI", size: 15)]
+    font_normal: nwg::Font,
+
     // Main window
-    #[nwg_control(size: (400, 300), position: (300, 300), title: "MyTime - Time Tracker", flags: "WINDOW|VISIBLE|MINIMIZE_BOX")]
+    #[nwg_control(size: (450, 400), position: (300, 200), title: "MyTime", flags: "WINDOW|VISIBLE|MINIMIZE_BOX")]
     #[nwg_events(OnWindowClose: [MyTimeApp::on_close], OnWindowMinimize: [MyTimeApp::on_minimize])]
     window: nwg::Window,
 
     // Layout
-    #[nwg_layout(parent: window, spacing: 5, margin: [10, 10, 10, 10])]
+    #[nwg_layout(parent: window, spacing: 8, margin: [20, 20, 20, 20])]
     layout: nwg::GridLayout,
 
-    // Status label
-    #[nwg_control(text: "Status: Stopped", h_align: HTextAlign::Left)]
+    // Title/Status label
+    #[nwg_control(text: "⏱ Stopped", font: Some(&data.font_title))]
     #[nwg_layout_item(layout: layout, row: 0, col: 0, col_span: 2)]
     status_label: nwg::Label,
 
-    // Time label
-    #[nwg_control(text: "Total Time: 0h 0m 0s", h_align: HTextAlign::Left)]
+    // Time display - large and prominent
+    #[nwg_control(text: "00:00:00", font: Some(&data.font_time))]
     #[nwg_layout_item(layout: layout, row: 1, col: 0, col_span: 2)]
     time_label: nwg::Label,
 
     // Start button
-    #[nwg_control(text: "Start")]
+    #[nwg_control(text: "▶ Start", font: Some(&data.font_normal))]
     #[nwg_layout_item(layout: layout, row: 2, col: 0)]
     #[nwg_events(OnButtonClick: [MyTimeApp::on_start])]
     start_btn: nwg::Button,
 
     // Stop button
-    #[nwg_control(text: "Stop")]
+    #[nwg_control(text: "⏹ Stop", font: Some(&data.font_normal))]
     #[nwg_layout_item(layout: layout, row: 2, col: 1)]
     #[nwg_events(OnButtonClick: [MyTimeApp::on_stop])]
     stop_btn: nwg::Button,
 
+    // Section label
+    #[nwg_control(text: "Application Usage", font: Some(&data.font_normal))]
+    #[nwg_layout_item(layout: layout, row: 3, col: 0, col_span: 2)]
+    section_label: nwg::Label,
+
     // App usage list
     #[nwg_control(list_style: nwg::ListViewStyle::Detailed, ex_flags: nwg::ListViewExFlags::GRID | nwg::ListViewExFlags::FULL_ROW_SELECT)]
-    #[nwg_layout_item(layout: layout, row: 3, col: 0, col_span: 2, row_span: 3)]
+    #[nwg_layout_item(layout: layout, row: 4, col: 0, col_span: 2, row_span: 4)]
     app_list: nwg::ListView,
 
     // Timer for UI updates
@@ -127,7 +142,7 @@ impl MyTimeApp {
         *self.session_start.borrow_mut() = Some(Instant::now());
         self.should_stop_tracking.store(false, Ordering::SeqCst);
 
-        self.status_label.set_text("Status: Tracking");
+        self.status_label.set_text("⏱ Tracking");
         self.start_btn.set_enabled(false);
         self.stop_btn.set_enabled(true);
         self.tray_start.set_enabled(false);
@@ -171,7 +186,7 @@ impl MyTimeApp {
             }
         }
 
-        self.status_label.set_text("Status: Stopped");
+        self.status_label.set_text("⏱ Stopped");
         self.start_btn.set_enabled(true);
         self.stop_btn.set_enabled(false);
         self.tray_start.set_enabled(true);
@@ -194,11 +209,12 @@ impl MyTimeApp {
         let minutes = (total.as_secs() % 3600) / 60;
         let seconds = total.as_secs() % 60;
 
-        self.time_label.set_text(&format!("Total Time: {}h {}m {}s", hours, minutes, seconds));
+        // Display time in HH:MM:SS format
+        self.time_label.set_text(&format!("{:02}:{:02}:{:02}", hours, minutes, seconds));
 
         // Update tray tooltip
         let status = if *self.is_tracking.borrow() { "Tracking" } else { "Stopped" };
-        let tip = format!("MyTime - {} ({}h {}m {}s)", status, hours, minutes, seconds);
+        let tip = format!("MyTime - {} ({:02}:{:02}:{:02})", status, hours, minutes, seconds);
         self.tray.set_tip(&tip);
 
         // Update app list
@@ -207,36 +223,116 @@ impl MyTimeApp {
 
     fn update_app_list(&self) {
         if let Ok(usage) = self.app_usage.lock() {
+            // Filter and transform the data
+            let mut filtered: Vec<(String, Duration)> = usage
+                .iter()
+                .filter(|(app, duration)| {
+                    // Filter out noise: short entries and system processes
+                    let app_lower = app.to_lowercase();
+                    duration.as_secs() >= 5
+                        && !app_lower.contains("explorer.exe")
+                        && !app_lower.contains("mytime")
+                        && !app_lower.contains("searchhost")
+                        && !app_lower.contains("shellexperiencehost")
+                        && !app_lower.contains("applicationframehost")
+                })
+                .map(|(app, duration)| {
+                    // Convert to friendly name (remove .exe, capitalize)
+                    let friendly_name = Self::to_friendly_name(app);
+                    (friendly_name, *duration)
+                })
+                .collect();
+
+            // Sort by duration (most used first)
+            filtered.sort_by(|a, b| b.1.cmp(&a.1));
+
             // Only update if there's new data
             let current_count = self.app_list.len();
-            if current_count != usage.len() || current_count == 0 {
+            if current_count != filtered.len() || current_count == 0 {
                 self.app_list.clear();
 
                 // Ensure columns exist
                 if self.app_list.column_len() == 0 {
                     self.app_list.insert_column("Application");
                     self.app_list.insert_column("Time");
-                    self.app_list.set_column_width(0, 200);
-                    self.app_list.set_column_width(1, 100);
+                    self.app_list.set_column_width(0, 250);
+                    self.app_list.set_column_width(1, 120);
                 }
 
-                for (app, duration) in usage.iter() {
-                    let minutes = duration.as_secs() / 60;
-                    let secs = duration.as_secs() % 60;
+                for (app, duration) in filtered.iter() {
+                    let time_str = Self::format_duration(*duration);
                     self.app_list.insert_item(nwg::InsertListViewItem {
-                        index: Some(0),
+                        index: Some(self.app_list.len() as i32),
                         column_index: 0,
                         text: Some(app.clone()),
                         image: None,
                     });
                     self.app_list.insert_item(nwg::InsertListViewItem {
-                        index: Some(0),
+                        index: Some(self.app_list.len() as i32 - 1),
                         column_index: 1,
-                        text: Some(format!("{}m {}s", minutes, secs)),
+                        text: Some(time_str),
                         image: None,
                     });
                 }
             }
+        }
+    }
+
+    fn to_friendly_name(app_name: &str) -> String {
+        // Remove .exe extension
+        let name = app_name.trim_end_matches(".exe").trim_end_matches(".EXE");
+
+        // Map known apps to friendly names
+        match name.to_lowercase().as_str() {
+            "code" => "Visual Studio Code".to_string(),
+            "msedge" => "Microsoft Edge".to_string(),
+            "chrome" => "Google Chrome".to_string(),
+            "firefox" => "Mozilla Firefox".to_string(),
+            "notepad" => "Notepad".to_string(),
+            "notepad++" => "Notepad++".to_string(),
+            "windowsterminal" => "Windows Terminal".to_string(),
+            "cmd" => "Command Prompt".to_string(),
+            "powershell" => "PowerShell".to_string(),
+            "slack" => "Slack".to_string(),
+            "teams" => "Microsoft Teams".to_string(),
+            "discord" => "Discord".to_string(),
+            "spotify" => "Spotify".to_string(),
+            "winword" => "Microsoft Word".to_string(),
+            "excel" => "Microsoft Excel".to_string(),
+            "powerpnt" => "Microsoft PowerPoint".to_string(),
+            "outlook" => "Microsoft Outlook".to_string(),
+            "devenv" => "Visual Studio".to_string(),
+            "idea64" => "IntelliJ IDEA".to_string(),
+            "webstorm64" => "WebStorm".to_string(),
+            "pycharm64" => "PyCharm".to_string(),
+            "cursor" => "Cursor".to_string(),
+            _ => {
+                // Capitalize first letter of each word
+                name.split(|c: char| c == '-' || c == '_' || c.is_whitespace())
+                    .filter(|s| !s.is_empty())
+                    .map(|word| {
+                        let mut chars = word.chars();
+                        match chars.next() {
+                            None => String::new(),
+                            Some(first) => first.to_uppercase().chain(chars).collect(),
+                        }
+                    })
+                    .collect::<Vec<_>>()
+                    .join(" ")
+            }
+        }
+    }
+
+    fn format_duration(duration: Duration) -> String {
+        let total_secs = duration.as_secs();
+        let hours = total_secs / 3600;
+        let minutes = (total_secs % 3600) / 60;
+        let secs = total_secs % 60;
+
+        if hours > 0 {
+            format!("{:02}:{:02}:{:02}", hours, minutes, secs)
+        } else {
+            format!("{:02}:{:02}", minutes, secs)
         }
     }
 

@@ -1,13 +1,13 @@
 fn main() {
-    // Embed Windows manifest for Common Controls v6
-    // This is required for native-windows-gui to work properly
+    // Embed Windows manifest for Common Controls v6 and DPI awareness
+    // This is required for native-windows-gui to work properly and render sharply
 
     #[cfg(windows)]
     {
         let mut res = winres::WindowsResource::new();
         res.set_manifest(r#"
 <?xml version="1.0" encoding="UTF-8" standalone="yes"?>
-<assembly xmlns="urn:schemas-microsoft-com:asm.v1" manifestVersion="1.0">
+<assembly xmlns="urn:schemas-microsoft-com:asm.v1" manifestVersion="1.0" xmlns:asmv3="urn:schemas-microsoft-com:asm.v3">
   <assemblyIdentity
     version="1.0.0.0"
     processorArchitecture="*"
@@ -26,6 +26,12 @@ fn main() {
       />
     </dependentAssembly>
   </dependency>
+  <asmv3:application>
+    <asmv3:windowsSettings>
+      <dpiAware xmlns="http://schemas.microsoft.com/SMI/2005/WindowsSettings">true/pm</dpiAware>
+      <dpiAwareness xmlns="http://schemas.microsoft.com/SMI/2016/WindowsSettings">permonitorv2,permonitor</dpiAwareness>
+    </asmv3:windowsSettings>
+  </asmv3:application>
 </assembly>
 "#);
         res.compile().unwrap();
