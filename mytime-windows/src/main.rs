@@ -90,8 +90,11 @@ pub struct MyTimeApp {
     #[nwg_resource(family: "Segoe UI", size: 15)]
     font_normal: nwg::Font,
 
+    #[nwg_resource(family: "Segoe UI", size: 13)]
+    font_small: nwg::Font,
+
     // Main window
-    #[nwg_control(size: (450, 400), position: (300, 200), title: "MyTime", flags: "WINDOW|VISIBLE|MINIMIZE_BOX")]
+    #[nwg_control(size: (500, 450), position: (300, 200), title: "MyTime", flags: "WINDOW|VISIBLE|MINIMIZE_BOX|RESIZABLE|MAXIMIZE_BOX")]
     #[nwg_events(OnWindowClose: [MyTimeApp::on_close], OnWindowMinimize: [MyTimeApp::on_minimize])]
     window: nwg::Window,
 
@@ -109,32 +112,37 @@ pub struct MyTimeApp {
     #[nwg_layout_item(layout: layout, row: 1, col: 0, col_span: 2)]
     time_label: nwg::Label,
 
+    // Summary label - shows top app and stats
+    #[nwg_control(text: "", font: Some(&data.font_small))]
+    #[nwg_layout_item(layout: layout, row: 2, col: 0, col_span: 2)]
+    summary_label: nwg::Label,
+
     // Start button
     #[nwg_control(text: "▶ Start", font: Some(&data.font_normal))]
-    #[nwg_layout_item(layout: layout, row: 2, col: 0)]
+    #[nwg_layout_item(layout: layout, row: 3, col: 0)]
     #[nwg_events(OnButtonClick: [MyTimeApp::on_start])]
     start_btn: nwg::Button,
 
     // Stop button
     #[nwg_control(text: "⏹ Stop", font: Some(&data.font_normal))]
-    #[nwg_layout_item(layout: layout, row: 2, col: 1)]
+    #[nwg_layout_item(layout: layout, row: 3, col: 1)]
     #[nwg_events(OnButtonClick: [MyTimeApp::on_stop])]
     stop_btn: nwg::Button,
 
     // Section label
     #[nwg_control(text: "Application Usage", font: Some(&data.font_normal))]
-    #[nwg_layout_item(layout: layout, row: 3, col: 0)]
+    #[nwg_layout_item(layout: layout, row: 4, col: 0)]
     section_label: nwg::Label,
 
     // Active time only checkbox
     #[nwg_control(text: "Active only", font: Some(&data.font_normal), check_state: nwg::CheckBoxState::Checked)]
-    #[nwg_layout_item(layout: layout, row: 3, col: 1)]
+    #[nwg_layout_item(layout: layout, row: 4, col: 1)]
     #[nwg_events(OnButtonClick: [MyTimeApp::on_toggle_hide_idle])]
     hide_idle_checkbox: nwg::CheckBox,
 
     // App usage list
     #[nwg_control(list_style: nwg::ListViewStyle::Detailed, ex_flags: nwg::ListViewExFlags::GRID | nwg::ListViewExFlags::FULL_ROW_SELECT)]
-    #[nwg_layout_item(layout: layout, row: 4, col: 0, col_span: 2, row_span: 4)]
+    #[nwg_layout_item(layout: layout, row: 5, col: 0, col_span: 2, row_span: 4)]
     app_list: nwg::ListView,
 
     // Timer for UI updates
@@ -277,8 +285,48 @@ impl MyTimeApp {
         let tip = format!("MyTime - {} ({:02}:{:02}:{:02})", status, hours, minutes, seconds);
         self.tray.set_tip(&tip);
 
-        // Update app list
+        // Update summary and app list
+        self.update_summary();
         self.update_app_list();
+    }
+
+    fn update_summary(&self) {
+        if let Ok(usage) = self.app_usage.lock() {
+            // Find top app by active time (excluding system processes)
+            let top_app = usage
+                .iter()
+                .filter(|(app, _)| {
+                    let app_lower = app.to_lowercase();
+                    !app_lower.contains("explorer.exe")
+                        && !app_lower.contains("mytime")
+                        && !app_lower.contains("searchhost")
+                        && !app_lower.contains("shellexperiencehost")
+                        && !app_lower.contains("applicationframehost")
+                })
+                .filter(|(_, stats)| stats.active_duration.as_secs() >= 5)
+                .max_by_key(|(_, stats)| stats.active_duration);
+
+            // Count apps with activity
+            let app_count = usage
+                .iter()
+                .filter(|(app, stats)| {
+                    let app_lower = app.to_lowercase();
+                    stats.active_duration.as_secs() >= 5
+                        && !app_lower.contains("explorer.exe")
+                        && !app_lower.contains("mytime")
+                })
+                .count();
+
+            let summary = if let Some((app_name, stats)) = top_app {
+                let friendly = Self::to_friendly_name(app_name);
+                let time_str = Self::format_duration(stats.active_duration);
+                format!("Top: {} ({}) · {} apps today", friendly, time_str, app_count)
+            } else {
+                "No activity tracked yet".to_string()
+            };
+
+            self.summary_label.set_text(&summary);
+        }
     }
 
     fn update_app_list(&self) {
@@ -756,8 +804,8 @@ mod tracker {
 
 mod storage {
     use super::*;
-    use std::fs::{metadata, OpenOptions};
-    use std::io::Write;
+    use std::fs::{metadata, File, OpenOptions};
+    use std::io::{BufReader, Write};
 
     fn get_data_path() -> std::path::PathBuf {
         if let Ok(exe_path) = std::env::current_exe() {
@@ -796,6 +844,46 @@ mod storage {
         wtr.flush()?;
         Ok(())
     }
+
+    /// Load today's entries from CSV and aggregate into AppStats
+    pub fn load_today_stats() -> HashMap<String, AppStats> {
+        let mut stats: HashMap<String, AppStats> = HashMap::new();
+        let file_path = get_data_path();
+
+        let file = match File::open(&file_path) {
+            Ok(f) => f,
+            Err(_) => return stats, // No file yet, return empty
+        };
+
+        let reader = BufReader::new(file);
+        let mut csv_reader = csv::ReaderBuilder::new()
+            .has_headers(true)
+            .from_reader(reader);
+
+        let today = Local::now().date_naive();
+
+        for result in csv_reader.deserialize() {
+            let entry: TimeEntry = match result {
+                Ok(e) => e,
+                Err(_) => continue, // Skip malformed rows
+            };
+
+            // Only include today's entries
+            if entry.start_time.date_naive() != today {
+                continue;
+            }
+
+            let app_stats = stats.entry(entry.app_name.clone()).or_default();
+            app_stats.add_session(
+                Duration::from_secs(entry.duration_seconds),
+                entry.idle_seconds,
+                entry.keystrokes,
+                entry.mouse_clicks,
+            );
+        }
+
+        stats
+    }
 }
 
 fn main() {
@@ -818,12 +906,16 @@ fn main() {
     nwg::init().expect("Failed to init Native Windows GUI");
     nwg::Font::set_global_family("Segoe UI").expect("Failed to set default font");
 
+    // Load today's previous data
+    let today_stats = storage::load_today_stats();
+    let today_total: Duration = today_stats.values().map(|s| s.active_duration).sum();
+
     let app = MyTimeApp {
         is_tracking: RefCell::new(false),
         session_start: RefCell::new(None),
-        total_time: RefCell::new(Duration::ZERO),
+        total_time: RefCell::new(today_total),
         time_entries: Arc::new(Mutex::new(Vec::new())),
-        app_usage: Arc::new(Mutex::new(HashMap::new())),
+        app_usage: Arc::new(Mutex::new(today_stats)),
         should_stop_tracking: Arc::new(AtomicBool::new(false)),
         tracking_thread: RefCell::new(None),
         hide_idle_sessions: RefCell::new(true), // Default: hide idle sessions
@@ -836,6 +928,10 @@ fn main() {
     ui.stop_btn.set_enabled(false);
     ui.tray_stop.set_enabled(false);
     ui.init_autostart_menu();
+
+    // Update display with loaded data
+    ui.update_app_list();
+    ui.on_timer(); // Update time display
 
     // Start the timer
     ui.timer.start();
