@@ -1,201 +1,213 @@
 # MyTime Windows Implementation Details
 
-## Current Implementation: native-windows-gui
+## Current Architecture (v0.2)
 
-### Why We Switched from egui/eframe
+### Module Structure
 
-The original implementation used **egui/eframe** but was abandoned due to a fundamental architectural limitation:
+```
+src/
+├── main.rs           # UI, tray, event handlers, legacy storage
+├── models.rs         # Data structures (Segment, Label, AppSummary, etc.)
+├── utils.rs          # Title hashing, time formatting, day boundary
+├── tracker.rs        # Foreground window tracking, stable-title rule
+├── categorizer.rs    # Heuristic category classification
+└── storage/
+    ├── mod.rs        # StorageAdapter trait
+    └── sqlite.rs     # SQLite implementation
+```
 
-**Problem**: egui/eframe's event loop stops processing when the window is hidden/minimized. This made system tray functionality impossible:
-- `request_repaint()` is ignored when window is not visible
-- Tray menu clicks don't work (ghost tray icon)
-- App can only be killed via Task Manager
-- No amount of workarounds (Win32 ShowWindow, PostMessage, etc.) could fix this
+### Technology Stack
 
-**Root Cause**: This is a known limitation documented in:
-- https://github.com/emilk/egui/discussions/5127
-- https://github.com/emilk/egui/discussions/737
-- https://github.com/emilk/egui/issues/1223
-
-The egui maintainers acknowledge: *"egui doesn't update once the window is not interactable e.g. invisible/minimized"*
-
-**Conclusion**: egui/eframe is not suitable for tray-based applications. We switched to **native-windows-gui** which provides proper Win32 integration.
+- **GUI Framework**: native-windows-gui (nwg) 1.0
+- **Database**: SQLite via rusqlite
+- **Hashing**: BLAKE3 for title normalization
+- **Language**: Rust (edition 2021)
+- **Windows API**: windows-rs 0.58
 
 ---
 
-## Technology Stack
+## Why native-windows-gui (Not egui)
 
-- **GUI Framework**: native-windows-gui (nwg) 1.0
-- **Language**: Rust (edition 2021)
-- **Windows API**: windows-rs 0.58 for tracking functionality
-- **Build**: winres for Windows manifest embedding
+The original implementation used **egui/eframe** but was abandoned due to:
 
-## Key Dependencies
+**Problem**: egui's event loop stops when window is hidden/minimized.
+- `request_repaint()` ignored when window not visible
+- Tray menu clicks don't work (ghost tray icon)
+- App can only be killed via Task Manager
 
-```toml
-[dependencies]
-native-windows-gui = "1.0"
-native-windows-derive = "1.0"
-windows = { version = "0.58", features = [...] }
-chrono = { version = "0.4", features = ["serde"] }
-csv = "1.3"
-serde = { version = "1.0", features = ["derive"] }
+**Root Cause**: Known limitation - egui doesn't update once window is not interactable.
 
-[build-dependencies]
-winres = "0.1"
+**Solution**: native-windows-gui provides proper Win32 message loop that works when hidden.
+
+---
+
+## Data Storage
+
+### SQLite Schema
+
+```sql
+-- Source of truth for time tracking
+CREATE TABLE segments (
+    segment_id TEXT PRIMARY KEY,
+    app_name TEXT NOT NULL,
+    window_title TEXT,
+    title_hash TEXT NOT NULL,
+    start_time INTEGER NOT NULL,  -- epoch ms
+    end_time INTEGER NOT NULL,    -- epoch ms
+    idle_seconds INTEGER DEFAULT 0,
+    keystrokes INTEGER DEFAULT 0,
+    mouse_clicks INTEGER DEFAULT 0,
+    focus_session_id TEXT NOT NULL,
+    device_id TEXT,
+    schema_version INTEGER DEFAULT 1,
+    created_at INTEGER NOT NULL
+);
+
+-- Category labels with provenance
+CREATE TABLE labels (
+    title_hash TEXT PRIMARY KEY,
+    category TEXT NOT NULL,
+    source TEXT NOT NULL,  -- 'heuristic', 'user', 'ai'
+    confidence REAL,
+    updated_at INTEGER NOT NULL
+);
+
+-- Key-value config storage
+CREATE TABLE config (
+    key TEXT PRIMARY KEY,
+    value TEXT NOT NULL
+);
 ```
 
-## Architecture
+### Data Location
 
-### Single-File Design
-All code is in `src/main.rs` - approximately 650 lines:
-- UI definition using NwgUi derive macro
-- Event handlers for window and tray
-- Tracker module for foreground window monitoring
-- Storage module for CSV persistence
+Determined by `bootstrap.json` next to executable:
+- **AppData** (default): `%APPDATA%\MyTime\mytime.db`
+- **Portable**: Same directory as executable
 
-### UI Components
+---
+
+## Tracking Logic (tracker.rs)
+
+### Stable-Title Rule
+
+Wait 2 seconds before finalizing a segment to avoid noise from rapidly changing titles:
+
+```rust
+const TITLE_STABILITY_MS: u64 = 2000;
+
+// Only finalize when:
+// 1. Title changed AND
+// 2. New title stable for 2s AND
+// 3. Tracker matches new title
+if title_changed && tracker_stable && tracker_matches_new {
+    finalize_segment();
+    start_new_segment();
+}
+```
+
+### Focus Session Logic
+
+New focus session created when:
+1. **App changes** (not just title), OR
+2. **Same app returns after 30s gap**
+
+```rust
+let app_changed = prev_app_name != app_name;
+let is_new_focus_session = if app_changed {
+    current_app.as_ref() != Some(&app_name) || gap_exceeded
+} else {
+    false  // Same app, title change = same session
+};
+```
+
+### Idle Detection
+
+Uses `GetLastInputInfo()` to track seconds without keyboard/mouse input:
+- Threshold: 30 seconds
+- Accumulates in `idle_seconds` field per segment
+
+### Activity Metrics
+
+Global hooks count keystrokes and mouse clicks:
+```rust
+static KEYSTROKE_COUNTER: AtomicU64;
+static CLICK_COUNTER: AtomicU64;
+```
+
+---
+
+## Categorization (categorizer.rs)
+
+### Heuristic Rules
+
+Pattern matching on app name and window title:
+
+| Category | Examples |
+|----------|----------|
+| Entertainment | YouTube, Netflix, Reddit, Spotify, Steam |
+| Development | VS Code, GitHub, Terminal, localhost |
+| Productivity | Claude, Notion, Google Docs, Figma |
+| Communication | Slack, Teams, Gmail, Zoom |
+| Unknown | Anything else |
+
+### Label Priority
+
+When multiple labels exist: **User > AI > Heuristic**
+
+```sql
+ORDER BY CASE source
+    WHEN 'user' THEN 1
+    WHEN 'ai' THEN 2
+    WHEN 'heuristic' THEN 3
+END
+```
+
+---
+
+## UI Components
+
+### Main Window
 
 ```rust
 #[derive(Default, NwgUi)]
 pub struct MyTimeApp {
-    // Main window with minimize-to-tray behavior
     window: nwg::Window,
+    status_label: nwg::Label,      // "Tracking" / "Stopped"
+    time_label: nwg::Label,        // "02:34:15"
+    summary_label: nwg::Label,     // "Top: VS Code (1:23) - 5 apps"
+    category_label: nwg::Label,    // Category breakdown
+    app_list: nwg::ListView,       // App | Active | Idle columns
+    // ... buttons, tray, timer
+}
+```
 
-    // Controls: labels, buttons, list view
-    status_label: nwg::Label,
-    time_label: nwg::Label,
-    start_btn: nwg::Button,
-    stop_btn: nwg::Button,
-    app_list: nwg::ListView,
+### System Tray Menu
 
-    // Timer for 1-second UI updates
-    timer: nwg::AnimationTimer,
+- Show Window
+- Start Tracking / Stop Tracking
+- Export Today's Data
+- Start with Windows (checkbox)
+- Day Starts At... (config dialog)
+- Exit
 
-    // System tray
-    tray_icon: nwg::Icon,
-    tray: nwg::TrayNotification,
-    tray_menu: nwg::Menu,
-    // ... menu items
+### Configurable Day Boundary
 
-    // State (RefCell for interior mutability)
-    is_tracking: RefCell<bool>,
+Default: 6 AM (user can change via tray menu)
+
+```rust
+pub fn today_start_ms_with_hour(day_start_hour: u32) -> i64 {
+    // If current hour < day_start_hour, use yesterday's date
+    let effective_date = if now.hour() < day_start_hour {
+        today - Duration::days(1)
+    } else {
+        today
+    };
     // ...
 }
 ```
 
-### Why native-windows-gui Works
-
-1. **Proper Win32 Message Loop**: `nwg::dispatch_thread_events()` is a real Win32 message pump
-2. **Window Visibility**: `window.set_visible(false)` truly hides the window while keeping the message loop running
-3. **Timer Events**: `AnimationTimer` fires regardless of window visibility
-4. **Tray Updates**: All tray operations happen synchronously on the UI thread
-
-## Critical Implementation Details
-
-### Visual Styles (Modern Look)
-
-**Must call before `nwg::init()`**:
-```rust
-nwg::enable_visual_styles();
-nwg::init().expect("Failed to init Native Windows GUI");
-```
-
-Without this, the app looks like Windows 95.
-
-### Windows Manifest (Required)
-
-The app requires a manifest for Common Controls v6. Without it, you get `STATUS_ENTRYPOINT_NOT_FOUND` error.
-
-**build.rs**:
-```rust
-fn main() {
-    #[cfg(windows)]
-    {
-        let mut res = winres::WindowsResource::new();
-        res.set_manifest(r#"
-<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
-<assembly xmlns="urn:schemas-microsoft-com:asm.v1" manifestVersion="1.0">
-  <dependency>
-    <dependentAssembly>
-      <assemblyIdentity
-        type="win32"
-        name="Microsoft.Windows.Common-Controls"
-        version="6.0.0.0"
-        processorArchitecture="*"
-        publicKeyToken="6595b64144ccf1df"
-        language="*"
-      />
-    </dependentAssembly>
-  </dependency>
-</assembly>
-"#);
-        res.compile().unwrap();
-    }
-}
-```
-
-### Tray Icon Requirement
-
-`TrayNotification` **requires an icon at creation**. Use a system icon as fallback:
-```rust
-#[nwg_resource(source_system: Some(nwg::OemIcon::Information))]
-tray_icon: nwg::Icon,
-
-#[nwg_control(icon: Some(&data.tray_icon), tip: Some("MyTime - Stopped"))]
-tray: nwg::TrayNotification,
-```
-
-### Minimize to Tray
-
-```rust
-fn on_close(&self) {
-    // Hide instead of close
-    self.window.set_visible(false);
-}
-
-fn on_show(&self) {
-    self.window.set_visible(true);
-    self.window.set_focus();
-}
-```
-
-### Timer for Live Updates
-
-The timer ensures tray tooltip and UI update every second, even when hidden:
-```rust
-#[nwg_control(interval: Duration::from_millis(1000))]
-#[nwg_events(OnTimerTick: [MyTimeApp::on_timer])]
-timer: nwg::AnimationTimer,
-
-// In main():
-ui.timer.start();
-```
-
-## Features
-
-### Time Tracking
-- Monitors foreground window using Win32 `GetForegroundWindow()`
-- Records app name, window title, duration, idle time, keystrokes, mouse clicks
-- Saves to CSV in same directory as executable
-
-### System Tray
-- Left-click: Show window
-- Right-click: Context menu (Show, Start, Stop, Auto-start, Exit)
-- Tooltip: Shows current status and tracked time
-
-### Auto-Start with Windows
-- Uses Registry key: `HKEY_CURRENT_USER\SOFTWARE\Microsoft\Windows\CurrentVersion\Run`
-- Toggle via tray menu with checkbox indicator
-
-### Single Instance
-- Uses Windows Mutex to prevent multiple instances:
-```rust
-let mutex = CreateMutexW(None, true, w!("MyTimeAppMutex"));
-if GetLastError() == ERROR_ALREADY_EXISTS {
-    return; // Exit if already running
-}
-```
+---
 
 ## Build & Run
 
@@ -203,30 +215,57 @@ if GetLastError() == ERROR_ALREADY_EXISTS {
 cd mytime-windows
 cargo build --release
 .\target\release\mytime-win.exe
+
+# Run tests
+cargo test
 ```
 
-## Data Format
+### Required: Windows Manifest
 
-CSV file: `mytime_data.csv` (same directory as executable)
+The app requires Common Controls v6 manifest in `build.rs`:
 
-```csv
-app_name,window_title,start_time,end_time,duration_seconds,idle_seconds,keystrokes,mouse_clicks
-Code.exe,main.rs - mytime-windows,2025-01-15T10:30:00-05:00,2025-01-15T10:35:00-05:00,300,10,150,25
+```rust
+res.set_manifest(r#"
+<assembly ...>
+  <dependency>
+    <dependentAssembly>
+      <assemblyIdentity name="Microsoft.Windows.Common-Controls" version="6.0.0.0" .../>
+    </dependentAssembly>
+  </dependency>
+</assembly>
+"#);
 ```
+
+---
+
+## Migration from CSV
+
+On first run with existing `mytime_data.csv`:
+1. Prompt user to import
+2. Convert each row to Segment
+3. Create heuristic labels
+4. Backup CSV to `.csv.backup`
+
+---
 
 ## Troubleshooting
 
-### STATUS_ENTRYPOINT_NOT_FOUND
-- Missing Windows manifest in build.rs
-- Add winres dependency and manifest configuration
+| Issue | Cause | Fix |
+|-------|-------|-----|
+| STATUS_ENTRYPOINT_NOT_FOUND | Missing manifest | Add winres + manifest in build.rs |
+| Win95 look | Missing visual styles | Call `nwg::enable_visual_styles()` before init |
+| Tray icon missing | No icon resource | Use system icon fallback |
+| Column text truncated | Width too narrow | Columns are user-resizable |
 
-### Win95 Look
-- Missing `nwg::enable_visual_styles()` call before `nwg::init()`
+---
 
-### Tray Icon Not Showing
-- Icon resource not provided at TrayNotification creation
-- Use system icon as fallback
+## Files Changed This Phase
 
-### App Not Responding When Hidden
-- This was the egui problem - native-windows-gui handles this correctly
-- Timer keeps the message loop active
+| File | Changes |
+|------|---------|
+| `models.rs` | Renamed active_duration_ms -> total_duration_ms |
+| `utils.rs` | Added day_start_hour support, Timelike import |
+| `tracker.rs` | Fixed focus session logic (app change only) |
+| `categorizer.rs` | NEW - heuristic classification |
+| `storage/sqlite.rs` | Day start config, dominant category query |
+| `main.rs` | Category UI, export, day config dialog, import |

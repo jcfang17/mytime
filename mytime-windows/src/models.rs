@@ -112,8 +112,8 @@ impl Category {
 pub struct AppSummary {
     pub app_name: String,
     pub friendly_name: String,
-    pub active_duration_ms: i64,
-    pub idle_duration_ms: i64,
+    pub total_duration_ms: i64,    // Total segment duration (includes idle time)
+    pub idle_duration_ms: i64,     // Idle time (subset of total)
     pub segment_count: u32,
     pub keystrokes: u64,
     pub mouse_clicks: u64,
@@ -124,8 +124,8 @@ pub struct AppSummary {
 #[derive(Debug, Clone, Default)]
 pub struct DailySummary {
     pub date: String,              // YYYY-MM-DD
-    pub total_active_ms: i64,
-    pub total_idle_ms: i64,
+    pub total_duration_ms: i64,    // Total segment duration
+    pub total_idle_ms: i64,        // Idle time (subset of total)
     pub app_summaries: Vec<AppSummary>,
     pub category_breakdown: Vec<(String, i64)>, // (category, duration_ms)
 }

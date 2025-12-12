@@ -123,6 +123,20 @@ impl SqliteStorage {
             .ok_or_else(|| "device_id not found".into())
     }
 
+    /// Get the day start hour (0-23), defaults to 6 (6 AM)
+    pub fn get_day_start_hour(&self) -> StorageResult<u32> {
+        match self.get_config("day_start_hour")? {
+            Some(value) => Ok(value.parse().unwrap_or(crate::utils::DEFAULT_DAY_START_HOUR)),
+            None => Ok(crate::utils::DEFAULT_DAY_START_HOUR),
+        }
+    }
+
+    /// Set the day start hour (0-23)
+    pub fn set_day_start_hour(&self, hour: u32) -> StorageResult<()> {
+        let hour = hour.min(23); // Clamp to valid range
+        self.set_config("day_start_hour", &hour.to_string())
+    }
+
     /// Run SQL migration
     fn run_migration_v001(conn: &Connection) -> StorageResult<()> {
         conn.execute_batch(
@@ -374,13 +388,17 @@ impl StorageAdapter for SqliteStorage {
     }
 
     fn get_daily_summary(&self, date: &str) -> StorageResult<DailySummary> {
-        // Parse date to get start/end timestamps
-        let start_of_day = chrono::NaiveDate::parse_from_str(date, "%Y-%m-%d")
-            .map_err(|e| e.to_string())?
-            .and_hms_opt(0, 0, 0)
+        // Get configured day start hour
+        let day_start_hour = self.get_day_start_hour()?;
+
+        // Parse date to get start/end timestamps using configured day start hour
+        let parsed_date = chrono::NaiveDate::parse_from_str(date, "%Y-%m-%d")
+            .map_err(|e| e.to_string())?;
+        let start_of_day = parsed_date
+            .and_hms_opt(day_start_hour, 0, 0)
             .unwrap();
 
-        let local_offset = chrono::Local::now().offset().clone();
+        let local_offset = *chrono::Local::now().offset();
         let start_dt = chrono::DateTime::<chrono::Local>::from_naive_utc_and_offset(
             start_of_day - local_offset,
             local_offset,
@@ -392,7 +410,7 @@ impl StorageAdapter for SqliteStorage {
 
         let app_summaries = self.get_app_breakdown(start_ms, end_ms)?;
 
-        let total_active_ms: i64 = app_summaries.iter().map(|s| s.active_duration_ms).sum();
+        let total_duration_ms: i64 = app_summaries.iter().map(|s| s.total_duration_ms).sum();
         let total_idle_ms: i64 = app_summaries.iter().map(|s| s.idle_duration_ms).sum();
 
         // Calculate category breakdown
@@ -400,14 +418,14 @@ impl StorageAdapter for SqliteStorage {
             std::collections::HashMap::new();
         for summary in &app_summaries {
             if let Some(cat) = &summary.primary_category {
-                *category_totals.entry(cat.clone()).or_default() += summary.active_duration_ms;
+                *category_totals.entry(cat.clone()).or_default() += summary.total_duration_ms;
             }
         }
         let category_breakdown: Vec<(String, i64)> = category_totals.into_iter().collect();
 
         Ok(DailySummary {
             date: date.to_string(),
-            total_active_ms,
+            total_duration_ms,
             total_idle_ms,
             app_summaries,
             category_breakdown,
@@ -417,6 +435,7 @@ impl StorageAdapter for SqliteStorage {
     fn get_app_breakdown(&self, start_ms: i64, end_ms: i64) -> StorageResult<Vec<AppSummary>> {
         let conn = self.conn.lock().map_err(|e| e.to_string())?;
 
+        // First, get basic app stats
         let mut stmt = conn.prepare(
             r#"
             SELECT
@@ -425,20 +444,7 @@ impl StorageAdapter for SqliteStorage {
                 SUM(s.idle_seconds * 1000) as total_idle_ms,
                 COUNT(*) as segment_count,
                 SUM(s.keystrokes) as total_keystrokes,
-                SUM(s.mouse_clicks) as total_clicks,
-                (
-                    SELECT l.category
-                    FROM labels l
-                    WHERE l.title_hash = s.title_hash
-                    ORDER BY
-                        CASE l.source
-                            WHEN 'user' THEN 1
-                            WHEN 'ai' THEN 2
-                            WHEN 'heuristic' THEN 3
-                            ELSE 4
-                        END
-                    LIMIT 1
-                ) as primary_category
+                SUM(s.mouse_clicks) as total_clicks
             FROM segments s
             WHERE s.start_time >= ?1 AND s.start_time < ?2
             GROUP BY s.app_name
@@ -446,36 +452,55 @@ impl StorageAdapter for SqliteStorage {
             "#,
         )?;
 
-        let summaries = stmt
+        let mut summaries: Vec<AppSummary> = stmt
             .query_map(params![start_ms, end_ms], |row| {
                 let app_name: String = row.get(0)?;
                 Ok(AppSummary {
                     friendly_name: crate::utils::to_friendly_name(&app_name),
                     app_name,
-                    active_duration_ms: row.get(1)?,
+                    total_duration_ms: row.get(1)?,
                     idle_duration_ms: row.get(2)?,
                     segment_count: row.get(3)?,
                     keystrokes: row.get(4)?,
                     mouse_clicks: row.get(5)?,
-                    primary_category: row.get(6)?,
+                    primary_category: None, // Will compute below
                 })
             })?
             .collect::<Result<Vec<_>, _>>()?;
+
+        // Now compute dominant category by duration for each app
+        // This properly joins segments to labels and finds the category with most time
+        let mut cat_stmt = conn.prepare(
+            r#"
+            SELECT l.category, SUM(s.end_time - s.start_time) as cat_duration
+            FROM segments s
+            LEFT JOIN labels l ON l.title_hash = s.title_hash
+            WHERE s.start_time >= ?1 AND s.start_time < ?2
+              AND s.app_name = ?3
+              AND l.category IS NOT NULL
+            GROUP BY l.category
+            ORDER BY cat_duration DESC
+            LIMIT 1
+            "#,
+        )?;
+
+        for summary in &mut summaries {
+            if let Ok(category) = cat_stmt.query_row(
+                params![start_ms, end_ms, &summary.app_name],
+                |row| row.get::<_, String>(0),
+            ) {
+                summary.primary_category = Some(category);
+            }
+        }
 
         Ok(summaries)
     }
 
     fn get_today_active_ms(&self) -> StorageResult<i64> {
-        let conn = self.conn.lock().map_err(|e| e.to_string())?;
+        let day_start_hour = self.get_day_start_hour()?;
+        let start_ms = crate::utils::today_start_ms_with_hour(day_start_hour);
 
-        let today = chrono::Local::now().date_naive();
-        let start_of_day = today.and_hms_opt(0, 0, 0).unwrap();
-        let local_offset = chrono::Local::now().offset().clone();
-        let start_dt = chrono::DateTime::<chrono::Local>::from_naive_utc_and_offset(
-            start_of_day - local_offset,
-            local_offset,
-        );
-        let start_ms = start_dt.timestamp_millis();
+        let conn = self.conn.lock().map_err(|e| e.to_string())?;
 
         let total: i64 = conn
             .query_row(

@@ -3,8 +3,10 @@
 extern crate native_windows_gui as nwg;
 extern crate native_windows_derive as nwd;
 
+mod categorizer;
 mod models;
 mod storage;
+mod tracker;
 mod utils;
 
 use nwd::NwgUi;
@@ -16,6 +18,8 @@ use std::collections::HashMap;
 use std::cell::RefCell;
 use chrono::{DateTime, Local};
 use serde::{Deserialize, Serialize};
+
+use storage::{SqliteStorage, StorageAdapter};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct TimeEntry {
@@ -121,32 +125,37 @@ pub struct MyTimeApp {
     #[nwg_layout_item(layout: layout, row: 2, col: 0, col_span: 2)]
     summary_label: nwg::Label,
 
+    // Category breakdown label
+    #[nwg_control(text: "", font: Some(&data.font_small))]
+    #[nwg_layout_item(layout: layout, row: 3, col: 0, col_span: 2)]
+    category_label: nwg::Label,
+
     // Start button
     #[nwg_control(text: "▶ Start", font: Some(&data.font_normal))]
-    #[nwg_layout_item(layout: layout, row: 3, col: 0)]
+    #[nwg_layout_item(layout: layout, row: 4, col: 0)]
     #[nwg_events(OnButtonClick: [MyTimeApp::on_start])]
     start_btn: nwg::Button,
 
     // Stop button
     #[nwg_control(text: "⏹ Stop", font: Some(&data.font_normal))]
-    #[nwg_layout_item(layout: layout, row: 3, col: 1)]
+    #[nwg_layout_item(layout: layout, row: 4, col: 1)]
     #[nwg_events(OnButtonClick: [MyTimeApp::on_stop])]
     stop_btn: nwg::Button,
 
     // Section label
     #[nwg_control(text: "Application Usage", font: Some(&data.font_normal))]
-    #[nwg_layout_item(layout: layout, row: 4, col: 0)]
+    #[nwg_layout_item(layout: layout, row: 5, col: 0)]
     section_label: nwg::Label,
 
     // Active time only checkbox
     #[nwg_control(text: "Active only", font: Some(&data.font_normal), check_state: nwg::CheckBoxState::Checked)]
-    #[nwg_layout_item(layout: layout, row: 4, col: 1)]
+    #[nwg_layout_item(layout: layout, row: 5, col: 1)]
     #[nwg_events(OnButtonClick: [MyTimeApp::on_toggle_hide_idle])]
     hide_idle_checkbox: nwg::CheckBox,
 
-    // App usage list
-    #[nwg_control(list_style: nwg::ListViewStyle::Detailed, ex_flags: nwg::ListViewExFlags::GRID | nwg::ListViewExFlags::FULL_ROW_SELECT)]
-    #[nwg_layout_item(layout: layout, row: 5, col: 0, col_span: 2, row_span: 4)]
+    // App usage list (columns are resizable by dragging header borders)
+    #[nwg_control(list_style: nwg::ListViewStyle::Detailed, flags: "VISIBLE|TAB_STOP", ex_flags: nwg::ListViewExFlags::GRID | nwg::ListViewExFlags::FULL_ROW_SELECT)]
+    #[nwg_layout_item(layout: layout, row: 6, col: 0, col_span: 2, row_span: 4)]
     app_list: nwg::ListView,
 
     // Timer for UI updates
@@ -182,12 +191,23 @@ pub struct MyTimeApp {
     #[nwg_control(parent: tray_menu)]
     tray_sep: nwg::MenuSeparator,
 
+    #[nwg_control(parent: tray_menu, text: "Export Today's Data")]
+    #[nwg_events(OnMenuItemSelected: [MyTimeApp::on_export_csv])]
+    tray_export: nwg::MenuItem,
+
+    #[nwg_control(parent: tray_menu)]
+    tray_sep2: nwg::MenuSeparator,
+
     #[nwg_control(parent: tray_menu, text: "Start with Windows")]
     #[nwg_events(OnMenuItemSelected: [MyTimeApp::on_toggle_autostart])]
     tray_autostart: nwg::MenuItem,
 
+    #[nwg_control(parent: tray_menu, text: "Day Starts At...")]
+    #[nwg_events(OnMenuItemSelected: [MyTimeApp::on_configure_day_start])]
+    tray_day_start: nwg::MenuItem,
+
     #[nwg_control(parent: tray_menu)]
-    tray_sep2: nwg::MenuSeparator,
+    tray_sep3: nwg::MenuSeparator,
 
     #[nwg_control(parent: tray_menu, text: "Exit")]
     #[nwg_events(OnMenuItemSelected: [MyTimeApp::on_exit])]
@@ -202,6 +222,8 @@ pub struct MyTimeApp {
     should_stop_tracking: Arc<AtomicBool>,
     tracking_thread: RefCell<Option<std::thread::JoinHandle<()>>>,
     hide_idle_sessions: RefCell<bool>,
+    // SQLite storage for new segment-based tracking
+    sqlite_storage: Option<Arc<SqliteStorage>>,
 }
 
 impl MyTimeApp {
@@ -221,16 +243,25 @@ impl MyTimeApp {
         self.tray_stop.set_enabled(true);
         self.update_tray_icon(true);
 
-        // Start tracking thread
-        let entries = Arc::clone(&self.time_entries);
-        let app_usage = Arc::clone(&self.app_usage);
+        // Start tracking thread using new segment-based tracker
         let stop_flag = Arc::clone(&self.should_stop_tracking);
 
-        let handle = std::thread::spawn(move || {
-            tracker::track_foreground_window(entries, app_usage, stop_flag);
-        });
-
-        *self.tracking_thread.borrow_mut() = Some(handle);
+        // Use new SQLite-backed tracker if available, otherwise fall back to legacy
+        if let Some(ref storage) = self.sqlite_storage {
+            let storage = Arc::clone(storage);
+            let handle = std::thread::spawn(move || {
+                tracker::track_foreground_window(storage, stop_flag, None);
+            });
+            *self.tracking_thread.borrow_mut() = Some(handle);
+        } else {
+            // Fallback to legacy tracker (shouldn't happen in normal usage)
+            let entries = Arc::clone(&self.time_entries);
+            let app_usage = Arc::clone(&self.app_usage);
+            let handle = std::thread::spawn(move || {
+                legacy_tracker::track_foreground_window(entries, app_usage, stop_flag);
+            });
+            *self.tracking_thread.borrow_mut() = Some(handle);
+        }
     }
 
     fn on_stop(&self) {
@@ -250,11 +281,14 @@ impl MyTimeApp {
             let _ = handle.join();
         }
 
-        // Save entries
-        if let Ok(mut entries) = self.time_entries.lock() {
-            if !entries.is_empty() {
-                legacy_storage::save_to_csv(&entries).ok();
-                entries.clear();
+        // Save entries to legacy CSV only if NOT using SQLite
+        // (SQLite tracker saves segments directly, no need for CSV)
+        if self.sqlite_storage.is_none() {
+            if let Ok(mut entries) = self.time_entries.lock() {
+                if !entries.is_empty() {
+                    legacy_storage::save_to_csv(&entries).ok();
+                    entries.clear();
+                }
             }
         }
 
@@ -289,14 +323,53 @@ impl MyTimeApp {
         let tip = format!("MyTime - {} ({:02}:{:02}:{:02})", status, hours, minutes, seconds);
         self.tray.set_tip(&tip);
 
-        // Update summary and app list
+        // Update summary, categories, and app list
         self.update_summary();
+        self.update_category_breakdown();
         self.update_app_list();
     }
 
     fn update_summary(&self) {
+        // Try SQLite first
+        if let Some(ref storage) = self.sqlite_storage {
+            let day_start_hour = storage.get_day_start_hour().unwrap_or(utils::DEFAULT_DAY_START_HOUR);
+            let today_start_ms = utils::today_start_ms_with_hour(day_start_hour);
+            let now_ms = utils::now_ms();
+
+            match storage.get_app_breakdown(today_start_ms, now_ms) {
+                Ok(summaries) => {
+                    let filtered: Vec<_> = summaries
+                        .iter()
+                        .filter(|s| {
+                            let app_lower = s.app_name.to_lowercase();
+                            !app_lower.contains("explorer.exe")
+                                && !app_lower.contains("mytime")
+                                && !app_lower.contains("searchhost")
+                                && !app_lower.contains("shellexperiencehost")
+                                && !app_lower.contains("applicationframehost")
+                        })
+                        .filter(|s| s.total_duration_ms >= 5000)
+                        .collect();
+
+                    let top_app = filtered.first();
+                    let app_count = filtered.len();
+
+                    let summary = if let Some(app) = top_app {
+                        let time_str = utils::format_duration_ms(app.total_duration_ms);
+                        format!("Top: {} ({}) · {} apps today", app.friendly_name, time_str, app_count)
+                    } else {
+                        "No activity tracked yet".to_string()
+                    };
+
+                    self.summary_label.set_text(&summary);
+                    return;
+                }
+                Err(_) => {}
+            }
+        }
+
+        // Fallback to legacy HashMap
         if let Ok(usage) = self.app_usage.lock() {
-            // Find top app by active time (excluding system processes)
             let top_app = usage
                 .iter()
                 .filter(|(app, _)| {
@@ -310,7 +383,6 @@ impl MyTimeApp {
                 .filter(|(_, stats)| stats.active_duration.as_secs() >= 5)
                 .max_by_key(|(_, stats)| stats.active_duration);
 
-            // Count apps with activity
             let app_count = usage
                 .iter()
                 .filter(|(app, stats)| {
@@ -333,16 +405,145 @@ impl MyTimeApp {
         }
     }
 
+    fn update_category_breakdown(&self) {
+        // Try SQLite first
+        if let Some(ref storage) = self.sqlite_storage {
+            let today = chrono::Local::now().format("%Y-%m-%d").to_string();
+
+            if let Ok(summary) = storage.get_daily_summary(&today) {
+                if summary.category_breakdown.is_empty() {
+                    self.category_label.set_text("");
+                    return;
+                }
+
+                // Sort by duration (descending) and format
+                let mut categories: Vec<_> = summary.category_breakdown.clone();
+                categories.sort_by(|a, b| b.1.cmp(&a.1));
+
+                let parts: Vec<String> = categories
+                    .iter()
+                    .filter(|(cat, ms)| *ms >= 5000 && cat != "unknown") // At least 5s, skip unknown
+                    .take(4) // Show top 4 categories
+                    .map(|(cat, ms)| {
+                        let emoji = match cat.as_str() {
+                            "entertainment" => "🎬",
+                            "development" => "💻",
+                            "productivity" => "📝",
+                            "communication" => "💬",
+                            _ => "❓",
+                        };
+                        format!("{} {}", emoji, utils::format_duration_ms(*ms))
+                    })
+                    .collect();
+
+                if parts.is_empty() {
+                    self.category_label.set_text("");
+                } else {
+                    self.category_label.set_text(&parts.join("  "));
+                }
+                return;
+            }
+        }
+
+        // No SQLite or no data - clear label
+        self.category_label.set_text("");
+    }
+
     fn update_app_list(&self) {
         let show_all_time = !*self.hide_idle_sessions.borrow(); // Checkbox unchecked = show all
 
+        // Helper to populate list view
+        let populate_list = |app_list: &nwg::ListView, data: Vec<(String, i64, i64)>| {
+            let current_count = app_list.len();
+            if current_count != data.len() || current_count == 0 {
+                app_list.clear();
+
+                // Ensure columns exist
+                if app_list.column_len() == 0 {
+                    app_list.insert_column("Application");
+                    app_list.insert_column("Active");
+                    app_list.insert_column("Idle");
+                    app_list.set_column_width(0, 150);
+                    app_list.set_column_width(1, 80);
+                    app_list.set_column_width(2, 110);
+                }
+
+                for (app, active_ms, idle_ms) in data.iter() {
+                    let active_str = utils::format_duration_ms(*active_ms);
+                    let idle_str = if *idle_ms > 0 {
+                        format!("💤 {}", utils::format_duration_ms(*idle_ms))
+                    } else {
+                        "-".to_string()
+                    };
+                    let row_idx = app_list.len() as i32;
+
+                    app_list.insert_item(nwg::InsertListViewItem {
+                        index: Some(row_idx),
+                        column_index: 0,
+                        text: Some(app.clone()),
+                        image: None,
+                    });
+                    app_list.insert_item(nwg::InsertListViewItem {
+                        index: Some(row_idx),
+                        column_index: 1,
+                        text: Some(active_str),
+                        image: None,
+                    });
+                    app_list.insert_item(nwg::InsertListViewItem {
+                        index: Some(row_idx),
+                        column_index: 2,
+                        text: Some(idle_str),
+                        image: None,
+                    });
+                }
+            }
+        };
+
+        // Try SQLite first
+        if let Some(ref storage) = self.sqlite_storage {
+            let day_start_hour = storage.get_day_start_hour().unwrap_or(utils::DEFAULT_DAY_START_HOUR);
+            let today_start_ms = utils::today_start_ms_with_hour(day_start_hour);
+            let now_ms = utils::now_ms();
+
+            if let Ok(summaries) = storage.get_app_breakdown(today_start_ms, now_ms) {
+                let mut filtered: Vec<(String, i64, i64)> = summaries
+                    .iter()
+                    .filter(|s| {
+                        let app_lower = s.app_name.to_lowercase();
+                        !app_lower.contains("explorer.exe")
+                            && !app_lower.contains("mytime")
+                            && !app_lower.contains("searchhost")
+                            && !app_lower.contains("shellexperiencehost")
+                            && !app_lower.contains("applicationframehost")
+                    })
+                    .filter(|s| s.total_duration_ms >= 5000)
+                    .map(|s| {
+                        // Active = total - idle; show total or active based on checkbox
+                        let active_ms = s.total_duration_ms - s.idle_duration_ms;
+                        let display_ms = if show_all_time {
+                            s.total_duration_ms
+                        } else {
+                            active_ms
+                        };
+                        (s.friendly_name.clone(), active_ms, s.idle_duration_ms, display_ms)
+                    })
+                    .filter(|(_, _, _, display)| *display >= 5000)
+                    .map(|(name, active, idle, _)| (name, active, idle))
+                    .collect();
+
+                // Sort by active time (most used first)
+                filtered.sort_by(|a, b| b.1.cmp(&a.1));
+
+                populate_list(&self.app_list, filtered);
+                return;
+            }
+        }
+
+        // Fallback to legacy HashMap
         if let Ok(usage) = self.app_usage.lock() {
-            // Filter and transform the data
-            // Each entry: (friendly_name, display_duration, active_duration, idle_duration)
-            let mut filtered: Vec<(String, Duration, Duration, Duration)> = usage
+            let mut filtered: Vec<(String, i64, i64)> = usage
                 .iter()
                 .filter(|(app, _)| {
-                    // Filter out system processes
                     let app_lower = app.to_lowercase();
                     !app_lower.contains("explorer.exe")
                         && !app_lower.contains("mytime")
@@ -351,12 +552,10 @@ impl MyTimeApp {
                         && !app_lower.contains("applicationframehost")
                 })
                 .filter(|(_, stats)| {
-                    // Must have some active time (at least 5 seconds) OR showing all time
                     stats.active_duration.as_secs() >= 5 || (show_all_time && stats.total_duration().as_secs() >= 5)
                 })
                 .map(|(app, stats)| {
                     let friendly_name = Self::to_friendly_name(app);
-                    // Show active time by default, total time if toggle is unchecked
                     let display_duration = if show_all_time {
                         stats.total_duration()
                     } else {
@@ -364,56 +563,14 @@ impl MyTimeApp {
                     };
                     (friendly_name, display_duration, stats.active_duration, stats.idle_duration)
                 })
-                .filter(|(_, display, _, _)| display.as_secs() >= 5) // Filter out zero/tiny display times
+                .filter(|(_, display, _, _)| display.as_secs() >= 5)
+                .map(|(name, _, active, idle)| (name, active.as_millis() as i64, idle.as_millis() as i64))
                 .collect();
 
-            // Sort by display duration (most used first)
+            // Sort by active time
             filtered.sort_by(|a, b| b.1.cmp(&a.1));
 
-            // Only update if there's new data
-            let current_count = self.app_list.len();
-            if current_count != filtered.len() || current_count == 0 {
-                self.app_list.clear();
-
-                // Ensure columns exist
-                if self.app_list.column_len() == 0 {
-                    self.app_list.insert_column("Application");
-                    self.app_list.insert_column("Active");
-                    self.app_list.insert_column("Idle");
-                    self.app_list.set_column_width(0, 180);
-                    self.app_list.set_column_width(1, 80);
-                    self.app_list.set_column_width(2, 80);
-                }
-
-                for (app, _display, active, idle) in filtered.iter() {
-                    let active_str = Self::format_duration(*active);
-                    let idle_str = if idle.as_secs() > 0 {
-                        format!("💤 {}", Self::format_duration(*idle))
-                    } else {
-                        "-".to_string()
-                    };
-                    let row_idx = self.app_list.len() as i32;
-
-                    self.app_list.insert_item(nwg::InsertListViewItem {
-                        index: Some(row_idx),
-                        column_index: 0,
-                        text: Some(app.clone()),
-                        image: None,
-                    });
-                    self.app_list.insert_item(nwg::InsertListViewItem {
-                        index: Some(row_idx),
-                        column_index: 1,
-                        text: Some(active_str),
-                        image: None,
-                    });
-                    self.app_list.insert_item(nwg::InsertListViewItem {
-                        index: Some(row_idx),
-                        column_index: 2,
-                        text: Some(idle_str),
-                        image: None,
-                    });
-                }
-            }
+            populate_list(&self.app_list, filtered);
         }
     }
 
@@ -512,6 +669,80 @@ impl MyTimeApp {
         nwg::stop_thread_dispatch();
     }
 
+    fn on_export_csv(&self) {
+        if let Some(ref storage) = self.sqlite_storage {
+            // Generate filename with today's date
+            let today = chrono::Local::now().format("%Y-%m-%d").to_string();
+            let default_filename = format!("mytime_export_{}.csv", today);
+
+            // Get desktop path for default location
+            let desktop = std::env::var("USERPROFILE")
+                .map(|p| std::path::PathBuf::from(p).join("Desktop"))
+                .unwrap_or_else(|_| std::path::PathBuf::from("."));
+            let default_path = desktop.join(&default_filename);
+
+            // Use file save dialog
+            let mut dialog = nwg::FileDialog::default();
+            if nwg::FileDialog::builder()
+                .title("Export Today's Data")
+                .action(nwg::FileDialogAction::Save)
+                .filters("CSV Files (*.csv)|*.csv")
+                .build(&mut dialog)
+                .is_ok()
+            {
+                if dialog.run(Some(&self.window)) {
+                    if let Ok(path_str) = dialog.get_selected_item() {
+                        let mut output_path = std::path::PathBuf::from(&path_str);
+                        if output_path.extension().is_none() {
+                            output_path.set_extension("csv");
+                        }
+
+                        match legacy_storage::export_to_csv(storage, &output_path) {
+                            Ok(count) => {
+                                nwg::modal_info_message(
+                                    &self.window,
+                                    "Export Complete",
+                                    &format!("Exported {} entries to:\n{}", count, output_path.display()),
+                                );
+                            }
+                            Err(e) => {
+                                nwg::modal_info_message(
+                                    &self.window,
+                                    "Export Failed",
+                                    &format!("Failed to export: {}", e),
+                                );
+                            }
+                        }
+                    }
+                }
+            } else {
+                // Fallback: export to default path
+                match legacy_storage::export_to_csv(storage, &default_path) {
+                    Ok(count) => {
+                        nwg::modal_info_message(
+                            &self.window,
+                            "Export Complete",
+                            &format!("Exported {} entries to:\n{}", count, default_path.display()),
+                        );
+                    }
+                    Err(e) => {
+                        nwg::modal_info_message(
+                            &self.window,
+                            "Export Failed",
+                            &format!("Failed to export: {}", e),
+                        );
+                    }
+                }
+            }
+        } else {
+            nwg::modal_info_message(
+                &self.window,
+                "Export Not Available",
+                "SQLite storage is not initialized. Cannot export data.",
+            );
+        }
+    }
+
     fn on_toggle_hide_idle(&self) {
         let checked = self.hide_idle_checkbox.check_state() == nwg::CheckBoxState::Checked;
         *self.hide_idle_sessions.borrow_mut() = checked;
@@ -592,9 +823,127 @@ impl MyTimeApp {
     fn init_autostart_menu(&self) {
         self.tray_autostart.set_checked(Self::is_autostart_enabled());
     }
+
+    fn on_configure_day_start(&self) {
+        if let Some(ref storage) = self.sqlite_storage {
+            let current_hour = storage.get_day_start_hour().unwrap_or(utils::DEFAULT_DAY_START_HOUR);
+
+            // Use Rc<Cell<>> for shared state between closure and main code
+            let result = std::rc::Rc::new(std::cell::Cell::new(None::<u32>));
+            let result_clone = result.clone();
+
+            // Build dialog components
+            let mut input_dialog = nwg::TextInput::default();
+            let mut dialog_window = nwg::Window::default();
+            let mut ok_button = nwg::Button::default();
+            let mut cancel_button = nwg::Button::default();
+            let mut prompt_label = nwg::Label::default();
+
+            let _ = nwg::Window::builder()
+                .size((300, 180))
+                .position((400, 300))
+                .title("Day Start Hour")
+                .flags(nwg::WindowFlags::WINDOW | nwg::WindowFlags::VISIBLE)
+                .build(&mut dialog_window);
+
+            let _ = nwg::Label::builder()
+                .text(&format!("Enter hour (0-23).\nCurrent: {:02}:00\n\n0=midnight, 6=6AM, 12=noon", current_hour))
+                .parent(&dialog_window)
+                .position((20, 15))
+                .size((260, 80))
+                .build(&mut prompt_label);
+
+            let _ = nwg::TextInput::builder()
+                .text(&current_hour.to_string())
+                .parent(&dialog_window)
+                .position((20, 100))
+                .size((260, 25))
+                .build(&mut input_dialog);
+
+            let _ = nwg::Button::builder()
+                .text("OK")
+                .parent(&dialog_window)
+                .position((60, 135))
+                .size((80, 30))
+                .build(&mut ok_button);
+
+            let _ = nwg::Button::builder()
+                .text("Cancel")
+                .parent(&dialog_window)
+                .position((160, 135))
+                .size((80, 30))
+                .build(&mut cancel_button);
+
+            // Simple event loop for the dialog
+            dialog_window.set_focus();
+            input_dialog.set_focus();
+
+            // Bind events
+            let handler = nwg::full_bind_event_handler(&dialog_window.handle, move |evt, _evt_data, handle| {
+                match evt {
+                    nwg::Event::OnButtonClick => {
+                        if handle == ok_button.handle {
+                            if let Ok(hour) = input_dialog.text().parse::<u32>() {
+                                if hour <= 23 {
+                                    result_clone.set(Some(hour));
+                                }
+                            }
+                            nwg::stop_thread_dispatch();
+                        } else if handle == cancel_button.handle {
+                            nwg::stop_thread_dispatch();
+                        }
+                    }
+                    nwg::Event::OnWindowClose => {
+                        nwg::stop_thread_dispatch();
+                    }
+                    _ => {}
+                }
+            });
+
+            nwg::dispatch_thread_events();
+
+            nwg::unbind_event_handler(&handler);
+
+            // Save if we got a result
+            if let Some(new_hour) = result.get() {
+                if storage.set_day_start_hour(new_hour).is_ok() {
+                    let suffix = if new_hour == 0 {
+                        "midnight".to_string()
+                    } else if new_hour == 12 {
+                        "noon".to_string()
+                    } else if new_hour < 12 {
+                        format!("{} AM", new_hour)
+                    } else {
+                        format!("{} PM", new_hour - 12)
+                    };
+
+                    nwg::modal_info_message(
+                        &self.window,
+                        "Day Start Updated",
+                        &format!("Day now starts at {:02}:00 ({}).\n\nThe UI will refresh to reflect this change.", new_hour, suffix),
+                    );
+
+                    // Force refresh
+                    self.app_list.clear();
+                    while self.app_list.column_len() > 0 {
+                        self.app_list.remove_column(0);
+                    }
+                    self.update_summary();
+                    self.update_category_breakdown();
+                    self.update_app_list();
+                }
+            }
+        } else {
+            nwg::modal_info_message(
+                &self.window,
+                "Not Available",
+                "Day start configuration requires SQLite storage.",
+            );
+        }
+    }
 }
 
-mod tracker {
+mod legacy_tracker {
     use super::*;
     use windows::Win32::Foundation::*;
     use windows::Win32::UI::WindowsAndMessaging::*;
@@ -783,7 +1132,7 @@ mod tracker {
                 .to_string_lossy()
                 .to_string();
 
-            let app_name = exe_path.split('\\').last().unwrap_or("Unknown").to_string();
+            let app_name = exe_path.split('\\').next_back().unwrap_or("Unknown").to_string();
 
             CloseHandle(process).ok();
 
@@ -888,6 +1237,146 @@ mod legacy_storage {
 
         stats
     }
+
+    /// Check if legacy CSV file exists
+    pub fn csv_exists() -> bool {
+        get_data_path().exists()
+    }
+
+    /// Get the path to the legacy CSV file
+    pub fn get_csv_path() -> std::path::PathBuf {
+        get_data_path()
+    }
+
+    /// Import all CSV entries into SQLite storage
+    /// Returns (imported_count, skipped_count)
+    pub fn import_to_sqlite(storage: &crate::storage::SqliteStorage) -> Result<(usize, usize), Box<dyn std::error::Error>> {
+        use crate::storage::StorageAdapter;
+        use crate::categorizer::create_heuristic_label;
+        use crate::utils::compute_title_hash;
+
+        let file_path = get_data_path();
+        let file = File::open(&file_path)?;
+        let reader = BufReader::new(file);
+        let mut csv_reader = csv::ReaderBuilder::new()
+            .has_headers(true)
+            .from_reader(reader);
+
+        let mut imported = 0;
+        let mut skipped = 0;
+
+        for result in csv_reader.deserialize() {
+            let entry: TimeEntry = match result {
+                Ok(e) => e,
+                Err(_) => {
+                    skipped += 1;
+                    continue;
+                }
+            };
+
+            // Convert TimeEntry to Segment
+            let title_hash = compute_title_hash(&entry.app_name, &entry.window_title);
+            let focus_session_id = uuid::Uuid::new_v4().to_string();
+            let segment_id = uuid::Uuid::new_v4().to_string();
+
+            let segment = crate::models::Segment {
+                segment_id,
+                app_name: entry.app_name.clone(),
+                window_title: Some(entry.window_title.clone()),
+                title_hash: title_hash.clone(),
+                start_time: entry.start_time.timestamp_millis(),
+                end_time: entry.end_time.timestamp_millis(),
+                idle_seconds: entry.idle_seconds,
+                keystrokes: entry.keystrokes,
+                mouse_clicks: entry.mouse_clicks,
+                focus_session_id,
+                device_id: storage.get_device_id().ok(),
+                schema_version: 1,
+                created_at: crate::utils::now_ms(),
+            };
+
+            // Insert segment
+            if storage.insert_segment(&segment).is_ok() {
+                imported += 1;
+
+                // Create heuristic label if not exists
+                if storage.get_label(&title_hash).ok().flatten().is_none() {
+                    let label = create_heuristic_label(&title_hash, &entry.app_name, &entry.window_title);
+                    let _ = storage.upsert_label(&label);
+                }
+            } else {
+                skipped += 1;
+            }
+        }
+
+        Ok((imported, skipped))
+    }
+
+    /// Backup the CSV file by renaming it
+    pub fn backup_csv() -> Result<std::path::PathBuf, std::io::Error> {
+        let csv_path = get_data_path();
+        let backup_path = csv_path.with_extension("csv.backup");
+        std::fs::rename(&csv_path, &backup_path)?;
+        Ok(backup_path)
+    }
+
+    /// Export segments from SQLite to CSV file
+    pub fn export_to_csv(
+        storage: &crate::storage::SqliteStorage,
+        output_path: &std::path::Path,
+    ) -> Result<usize, Box<dyn std::error::Error>> {
+        use crate::storage::StorageAdapter;
+
+        // Get all segments from today (using configured day start hour)
+        let day_start_hour = storage.get_day_start_hour().unwrap_or(crate::utils::DEFAULT_DAY_START_HOUR);
+        let today_start = crate::utils::today_start_ms_with_hour(day_start_hour);
+        let now = crate::utils::now_ms();
+        let segments = storage.get_segments_range(today_start, now)
+            .map_err(|e| -> Box<dyn std::error::Error> { e })?;
+
+        let file = OpenOptions::new()
+            .create(true)
+            .write(true)
+            .truncate(true)
+            .open(output_path)?;
+
+        // Write header
+        writeln!(
+            &file,
+            "app_name,window_title,start_time,end_time,duration_seconds,idle_seconds,keystrokes,mouse_clicks"
+        )?;
+
+        let mut wtr = csv::WriterBuilder::new()
+            .has_headers(false)
+            .from_writer(file);
+
+        let mut count = 0;
+        for seg in &segments {
+            let start_time = chrono::DateTime::from_timestamp_millis(seg.start_time)
+                .map(|dt| dt.with_timezone(&Local))
+                .unwrap_or_else(Local::now);
+            let end_time = chrono::DateTime::from_timestamp_millis(seg.end_time)
+                .map(|dt| dt.with_timezone(&Local))
+                .unwrap_or_else(Local::now);
+
+            let entry = TimeEntry {
+                app_name: seg.app_name.clone(),
+                window_title: seg.window_title.clone().unwrap_or_default(),
+                start_time,
+                end_time,
+                duration_seconds: seg.duration_seconds(),
+                idle_seconds: seg.idle_seconds,
+                keystrokes: seg.keystrokes,
+                mouse_clicks: seg.mouse_clicks,
+            };
+
+            wtr.serialize(&entry)?;
+            count += 1;
+        }
+
+        wtr.flush()?;
+        Ok(count)
+    }
 }
 
 fn main() {
@@ -910,9 +1399,101 @@ fn main() {
     nwg::init().expect("Failed to init Native Windows GUI");
     nwg::Font::set_global_family("Segoe UI").expect("Failed to set default font");
 
-    // Load today's previous data
-    let today_stats = legacy_storage::load_today_stats();
-    let today_total: Duration = today_stats.values().map(|s| s.active_duration).sum();
+    // Initialize SQLite storage
+    let sqlite_storage = match SqliteStorage::new() {
+        Ok(storage) => Some(Arc::new(storage)),
+        Err(_) => None,
+    };
+
+    // Check for legacy CSV and offer import
+    if let Some(ref storage) = sqlite_storage {
+        if legacy_storage::csv_exists() {
+            // Check if we've already imported (by checking if DB has any segments)
+            let has_segments = storage.get_today_active_ms().unwrap_or(0) > 0
+                || storage.get_segments_range(0, i64::MAX).map(|s| !s.is_empty()).unwrap_or(false);
+
+            if !has_segments {
+                // Show import dialog - need a temporary window for the dialog
+                let csv_path = legacy_storage::get_csv_path();
+                let msg = format!(
+                    "Found existing data at:\n{}\n\nWould you like to import it into the new database?",
+                    csv_path.display()
+                );
+
+                // Use simple message box via Windows API
+                let result = unsafe {
+                    use windows::Win32::UI::WindowsAndMessaging::*;
+                    use windows::core::w;
+                    let msg_wide: Vec<u16> = msg.encode_utf16().chain(std::iter::once(0)).collect();
+                    MessageBoxW(
+                        None,
+                        windows::core::PCWSTR(msg_wide.as_ptr()),
+                        w!("Import Existing Data"),
+                        MB_YESNO | MB_ICONQUESTION,
+                    )
+                };
+
+                if result == windows::Win32::UI::WindowsAndMessaging::IDYES {
+                    match legacy_storage::import_to_sqlite(storage) {
+                        Ok((imported, skipped)) => {
+                            let backup_msg = match legacy_storage::backup_csv() {
+                                Ok(path) => format!("\n\nOriginal CSV backed up to:\n{}", path.display()),
+                                Err(_) => String::new(),
+                            };
+                            let success_msg = format!(
+                                "Successfully imported {} entries ({} skipped).{}",
+                                imported, skipped, backup_msg
+                            );
+                            unsafe {
+                                use windows::Win32::UI::WindowsAndMessaging::*;
+                                use windows::core::w;
+                                let msg_wide: Vec<u16> = success_msg.encode_utf16().chain(std::iter::once(0)).collect();
+                                MessageBoxW(
+                                    None,
+                                    windows::core::PCWSTR(msg_wide.as_ptr()),
+                                    w!("Import Complete"),
+                                    MB_OK | MB_ICONINFORMATION,
+                                );
+                            }
+                        }
+                        Err(e) => {
+                            let error_msg = format!("Failed to import data: {}", e);
+                            unsafe {
+                                use windows::Win32::UI::WindowsAndMessaging::*;
+                                use windows::core::w;
+                                let msg_wide: Vec<u16> = error_msg.encode_utf16().chain(std::iter::once(0)).collect();
+                                MessageBoxW(
+                                    None,
+                                    windows::core::PCWSTR(msg_wide.as_ptr()),
+                                    w!("Import Failed"),
+                                    MB_OK | MB_ICONERROR,
+                                );
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    // Load today's data - prefer SQLite if available, otherwise legacy CSV
+    let (today_stats, today_total) = if let Some(ref storage) = sqlite_storage {
+        match storage.get_today_active_ms() {
+            Ok(ms) => {
+                let legacy_stats = legacy_storage::load_today_stats();
+                (legacy_stats, Duration::from_millis(ms as u64))
+            }
+            Err(_) => {
+                let legacy_stats = legacy_storage::load_today_stats();
+                let total: Duration = legacy_stats.values().map(|s| s.active_duration).sum();
+                (legacy_stats, total)
+            }
+        }
+    } else {
+        let legacy_stats = legacy_storage::load_today_stats();
+        let total: Duration = legacy_stats.values().map(|s| s.active_duration).sum();
+        (legacy_stats, total)
+    };
 
     let app = MyTimeApp {
         is_tracking: RefCell::new(false),
@@ -923,6 +1504,7 @@ fn main() {
         should_stop_tracking: Arc::new(AtomicBool::new(false)),
         tracking_thread: RefCell::new(None),
         hide_idle_sessions: RefCell::new(true), // Default: hide idle sessions
+        sqlite_storage,
         ..Default::default()
     };
 

@@ -1,50 +1,117 @@
 # MyTime Enhancement Plan
 
-## CSV Schema Enhancements
+## Implementation Status
 
-### Current Schema Issues
-- Windows and macOS have inconsistent CSV formats (quoting, timezone)
-- Missing critical fields for productivity analysis
-- No explicit end_time (must be calculated from start_time + duration)
-- No idle detection to distinguish active work from passive time
-- No activity metrics for deeper productivity insights
+### Completed (Windows)
 
-### Required Schema Changes
+#### Phase 1: Storage Foundation
+- [x] SQLite database with segments and labels tables
+- [x] Epoch milliseconds for all timestamps
+- [x] BLAKE3 title hashing (app + normalized_title)
+- [x] Bootstrap config for portable vs AppData storage
+- [x] Schema migrations support
 
-#### 1. Add end_time field
-- **Why**: Easier database queries and time range analysis
-- **Implementation**: Calculate and store when tracking window changes
-- **Format**: ISO8601 with consistent timezone (UTC recommended)
+#### Phase 2: Segment Tracking
+- [x] Stable-title rule (2s wait before finalizing segment)
+- [x] Focus session grouping (new session on app change or 30s gap)
+- [x] Idle detection via GetLastInputInfo
+- [x] Keystroke and mouse click counting via hooks
+- [x] Raw window title preserved in DB
 
-#### 2. Add idle_seconds field
-- **Why**: Distinguish active work from passive reading/thinking time
-- **Implementation**: 
-  - Windows: Use `GetLastInputInfo()` API
-  - macOS: Use `CGEventSourceSecondsSinceLastEventType()`
-  - Track seconds of inactivity within each time entry
-- **Threshold**: Consider idle after 30 seconds of no input
+#### Phase 3: Labels & Categories
+- [x] Heuristic categorizer (entertainment, development, productivity, communication)
+- [x] Labels table with provenance (source: heuristic/user/ai)
+- [x] Category breakdown in UI
+- [x] Dominant category by duration (not arbitrary segment)
 
-#### 3. Add activity metrics (keystrokes, mouse_clicks)
-- **Why**: Quantify activity level for productivity analysis
-- **Implementation**:
-  - Count keyboard and mouse events during active periods
-  - Reset counters when window changes
-  - Store as simple integers per time entry
-- **Privacy**: Count events only, don't capture actual keystrokes
+#### Phase 4: Migration & Compatibility
+- [x] CSV import on first run (with user prompt)
+- [x] CSV export for today's data
+- [x] Backup old CSV after import
+- [x] Configurable day start hour (default 6 AM)
 
-### New CSV Schema
+### Pending / Future Work
+
+#### Analytics Improvements
+- [ ] Segment-level category breakdown (currently app-level)
+- [ ] When user/AI labels added: join only highest-priority label per hash
+- [ ] Historical data views (week, month)
+
+#### macOS Parity
+- [ ] Port SQLite storage to macOS version
+- [ ] Port segment tracking with stable-title rule
+- [ ] Port heuristic categorizer
+
+#### Future Features
+- [ ] User label editing UI
+- [ ] AI-powered categorization
+- [ ] Cloud sync (optional)
+- [ ] Cross-device deduplication
+
+---
+
+## Architecture Notes
+
+### Data Model
+
+```
+segments (source of truth)
+├── segment_id (UUID)
+├── app_name, window_title, title_hash
+├── start_time, end_time (epoch ms)
+├── idle_seconds, keystrokes, mouse_clicks
+├── focus_session_id
+└── device_id, schema_version, created_at
+
+labels (category provenance)
+├── title_hash (FK to normalized title)
+├── category (entertainment/development/productivity/communication/unknown)
+├── source (heuristic/user/ai)
+├── confidence (for AI labels)
+└── updated_at
+
+config (key-value settings)
+├── device_id
+├── day_start_hour
+└── ... future settings
+```
+
+### Key Design Decisions
+
+1. **Segments as source of truth** - Sessions are derived, not stored
+2. **title_hash = BLAKE3(app + normalized_title)** - Privacy-safe grouping key
+3. **Raw title preserved** - Allows AI reclassification later
+4. **Labels with provenance** - User > AI > Heuristic priority
+5. **Epoch milliseconds** - Consistent across timezones
+6. **Configurable day boundary** - 6 AM default, user-adjustable
+
+### Reviewer Feedback Addressed
+
+| Issue | Status | Notes |
+|-------|--------|-------|
+| Focus session bug (title change = new session) | Fixed | Now only on app change |
+| get_daily_summary ignores day_start_hour | Fixed | Uses config value |
+| Category picks arbitrary segment | Fixed | Dominant by duration |
+| active_duration_ms naming | Fixed | Renamed to total_duration_ms |
+| Legacy CSV save when using SQLite | Fixed | Gated with is_none() check |
+
+### Known Limitations (OK for v1)
+
+- 2s shift at session start (stable-title tradeoff)
+- Category breakdown at app level, not segment level
+- Label double-counting possible when user/AI labels added
+
+---
+
+## Original Schema Enhancement Notes
+
+### CSV Schema (Legacy - for import/export)
 ```csv
 app_name,window_title,start_time,end_time,duration_seconds,idle_seconds,keystrokes,mouse_clicks
 ```
 
-### Implementation Notes
-- User/device info will be attached during bulk database upserts (not stored locally)
-- Both platforms must use identical CSV format (fix Windows vs macOS differences)
-- Use UTC timezone for all timestamps
-- Quote all string fields consistently
-
 ### Benefits for AI/Analytics
-- Calculate true "active time" (duration_seconds - idle_seconds)
-- Identify productivity patterns (high keystroke periods = coding, high clicks = design work)
-- Better time estimates for similar future tasks
-- Detect and filter out AFK (away from keyboard) periods
+- Calculate true "active time" (total - idle)
+- Identify productivity patterns
+- Better time estimates for similar tasks
+- Detect and filter AFK periods

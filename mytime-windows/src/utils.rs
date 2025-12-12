@@ -2,6 +2,7 @@
 
 #![allow(dead_code)] // Utils will be used in Phase 2
 
+use chrono::Timelike;
 use regex::Regex;
 use std::sync::LazyLock;
 
@@ -106,16 +107,35 @@ pub fn now_ms() -> i64 {
     chrono::Utc::now().timestamp_millis()
 }
 
+/// Default day start hour (6 AM) - day begins at 6 AM, not midnight
+pub const DEFAULT_DAY_START_HOUR: u32 = 6;
+
 /// Get start of today in local timezone as milliseconds
-pub fn today_start_ms() -> i64 {
-    let today = chrono::Local::now().date_naive();
-    let start_of_day = today.and_hms_opt(0, 0, 0).unwrap();
-    let local_offset = chrono::Local::now().offset().clone();
+/// Uses the provided day_start_hour (0-23) to determine when "today" starts
+/// If current time is before day_start_hour, we consider it still "yesterday"
+pub fn today_start_ms_with_hour(day_start_hour: u32) -> i64 {
+    let now = chrono::Local::now();
+    let today = now.date_naive();
+
+    // If current hour is before day_start_hour, use yesterday's date
+    let effective_date = if now.hour() < day_start_hour {
+        today - chrono::Duration::days(1)
+    } else {
+        today
+    };
+
+    let start_of_day = effective_date.and_hms_opt(day_start_hour, 0, 0).unwrap();
+    let local_offset = *now.offset();
     let start_dt = chrono::DateTime::<chrono::Local>::from_naive_utc_and_offset(
         start_of_day - local_offset,
         local_offset,
     );
     start_dt.timestamp_millis()
+}
+
+/// Get start of today using default day start hour (6 AM)
+pub fn today_start_ms() -> i64 {
+    today_start_ms_with_hour(DEFAULT_DAY_START_HOUR)
 }
 
 #[cfg(test)]
