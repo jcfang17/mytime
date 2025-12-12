@@ -35,15 +35,26 @@ segments (raw, append-only) → sessions (derived, recomputable) → insights (d
 - `rusqlite` crate (sync, simple, no async overhead)
 - Export CSV on demand for backward compatibility
 
-### Data Location: User Choice
+### Data Location: Safe Default with Portable Option
+
+**Default:** `%APPDATA%\MyTime\` (always writable)
+**Portable:** App folder, only if writable (test on startup)
 
 ```
-First run prompt:
-  [1] Portable mode - store in app folder (default)
-  [2] User data mode - store in %APPDATA%\MyTime\
+Bootstrap logic:
+1. Check for bootstrap.json next to exe (portable marker)
+2. If exists and folder writable → portable mode
+3. Otherwise → %APPDATA%\MyTime\ (create if needed)
 ```
 
-Store choice in `config.json` next to executable.
+**bootstrap.json** (next to exe, ONLY file outside DB):
+```json
+{
+  "data_location": "portable" | "appdata"
+}
+```
+
+First run: if exe folder is writable, prompt user for preference. Otherwise, silently use %APPDATA%.
 
 ---
 
@@ -63,6 +74,7 @@ Store choice in `config.json` next to executable.
 | `keystrokes` | INTEGER DEFAULT 0 | |
 | `mouse_clicks` | INTEGER DEFAULT 0 | |
 | `focus_session_id` | TEXT NOT NULL | Groups segments from same app focus block |
+| `device_id` | TEXT | Optional, set on first run, enables future multi-device |
 | `schema_version` | INTEGER DEFAULT 1 | |
 | `created_at` | INTEGER | Unix epoch ms |
 
@@ -89,7 +101,9 @@ Store choice in `config.json` next to executable.
 | `key` | TEXT PK | |
 | `value` | TEXT | JSON encoded |
 
-Keys: `device_id`, `redact_titles`, `data_location`
+Keys: `device_id`, `redact_titles`
+
+**Note:** `data_location` is NOT in this table - it's in `bootstrap.json` (needed before DB path is known).
 
 ### Table: `schema_migrations`
 
@@ -139,18 +153,57 @@ fn normalize_title(title: &str) -> String {
 
 **Why app_name + title:** Prevents collisions ("Inbox" in Gmail vs Outlook).
 
-### Noisy Title Coalescing
+### Noisy Title Coalescing (Stable Title Rule)
 
-**Rule:** Don't drop raw data. Store all segments, but:
-1. Skip segments shorter than 2 seconds
-2. Use `title_hash` (normalized) for grouping - raw titles differ, hashes match
-3. Merge micro-segments in derived views/queries, not at write time
+**Rule:** Don't lose time from short title flickers. Keep previous segment open until new title is stable.
 
+```
+Timeline:
+  00:00 - Title "YouTube" starts
+  00:05 - Title changes to "Ad - 0:05" (don't close YouTube yet, start stability timer)
+  00:06 - Title changes to "Ad - 0:04" (reset stability timer)
+  00:07 - Title changes back to "YouTube" (reset stability timer)
+  00:09 - 2 seconds stable on "YouTube" → no segment created for ads, YouTube continues
+  00:30 - Title changes to "Claude.ai"
+  00:32 - 2 seconds stable → NOW close YouTube segment (00:00-00:32), open Claude segment
+```
+
+**Implementation:**
 ```rust
-fn should_create_segment(duration_ms: u64) -> bool {
-    duration_ms >= 2000  // At least 2 seconds
+struct PendingSegment {
+    app_name: String,
+    window_title: String,
+    start_time: i64,
+    // Accumulating metrics
+    idle_seconds: u64,
+    keystrokes: u64,
+    mouse_clicks: u64,
+}
+
+struct TitleStabilityTracker {
+    pending_title: String,
+    pending_since: Instant,
+}
+
+fn on_title_change(new_title: &str, tracker: &mut TitleStabilityTracker) {
+    tracker.pending_title = new_title.to_string();
+    tracker.pending_since = Instant::now();
+}
+
+fn on_tick(tracker: &TitleStabilityTracker, current_segment: &mut PendingSegment) -> Option<Segment> {
+    if tracker.pending_title != current_segment.window_title
+       && tracker.pending_since.elapsed() >= Duration::from_secs(2) {
+        // Title stable for 2s, finalize previous segment
+        let completed = finalize_segment(current_segment);
+        // Start new segment with pending_title
+        *current_segment = PendingSegment::new(&tracker.pending_title);
+        return Some(completed);
+    }
+    None
 }
 ```
+
+**Key insight:** Time is never lost. The 2s stability window just delays segment boundaries, doesn't drop time.
 
 ---
 
@@ -277,11 +330,12 @@ app_name,window_title,start_time,end_time,duration_seconds,idle_seconds,keystrok
 
 | Feature | Reason |
 |---------|--------|
-| `device_id` in segments | Add when multi-device sync needed |
 | `url_domain`, `browser_tab_id` | Requires browser extension |
 | AI categorization | Need cloud backend first |
 | Sync to Supabase | Future phase |
 | Encryption at rest | Add when privacy mode implemented |
+
+**Note:** `device_id` IS included in schema (optional field, set on first run) for cheap future-proofing.
 
 ---
 
@@ -301,7 +355,7 @@ uuid = { version = "1.0", features = ["v4"] }
 - [ ] New install: creates DB, runs migrations
 - [ ] Existing CSV: prompts for import, migrates correctly
 - [ ] Segment creation: new segment per title change
-- [ ] Coalescing: segments < 2s are skipped
+- [ ] Coalescing: stable-title rule works (no time lost on flickers)
 - [ ] title_hash: same normalized title → same hash
 - [ ] Labels: heuristic categorizer populates labels table
 - [ ] Daily summary: aggregates correctly from segments
@@ -310,16 +364,50 @@ uuid = { version = "1.0", features = ["v4"] }
 
 ---
 
-## Open Questions
+## Resolved Questions
 
-1. **Segment batching:** Write segments immediately or batch every N seconds?
-   - Recommendation: Batch every 5 seconds to reduce disk I/O
+1. **Segment writes:** ~~Batch every N seconds~~ → **Write on segment close (title change/app switch)** inside a transaction. Low frequency, avoids losing data on crash.
 
-2. **Focus session gap threshold:** How long until new focus_session_id?
-   - Recommendation: Same app returning after > 30 seconds = new focus session
+2. **Focus session gap threshold:** Same app returning after > 30 seconds = new focus session. ✓
 
-3. **Title redaction mode:** Store null + hash, or encrypted title?
-   - Recommendation: Store null + hash (simpler, no key management)
+3. **Title redaction mode:** Store null + hash (simpler, no key management). ✓
+
+4. **Config storage:** `bootstrap.json` for data_location only (needed before DB path known). Everything else in SQLite `config` table. ✓
+
+5. **device_id:** Include in schema as optional field, generate UUID on first run, store in `config` table. Cheap future-proofing. ✓
+
+6. **Short segment handling:** Don't skip/drop. Use stable-title rule: keep previous segment open until new title is stable for 2s. No time is lost. ✓
+
+7. **Portable mode:** NOT default. Use `%APPDATA%\MyTime\` as safe default. Portable only if exe folder is writable AND user explicitly chooses it. ✓
+
+---
+
+## Implementation Phases
+
+### Phase 1: Storage Foundation
+1. Add dependencies (rusqlite, blake3, uuid)
+2. Create `storage/` module structure
+3. Implement bootstrap.json + data location logic
+4. Create SQLite schema (migration v001)
+5. Implement StorageAdapter trait + SqliteStorage
+6. Generate device_id on first run
+
+### Phase 2: Segment Tracking
+1. Extract tracker logic from main.rs to tracker.rs
+2. Implement PendingSegment + TitleStabilityTracker
+3. Change tracker to emit segments (not sessions)
+4. Write segments to SQLite on close (in transaction)
+5. Update UI to query from SQLite
+
+### Phase 3: Labels & Categories
+1. Implement heuristic categorizer
+2. Populate labels table on segment insert
+3. Update UI to show category breakdown
+
+### Phase 4: Migration & Compatibility
+1. CSV import on first run (if exists)
+2. CSV export menu option
+3. Backup old CSV after import
 
 ---
 
@@ -328,3 +416,4 @@ uuid = { version = "1.0", features = ["v4"] }
 | Date | Change |
 |------|--------|
 | 2025-12-11 | Initial draft based on team discussion |
+| 2025-12-11 | Rev 2: Fixed config duplication, added device_id, safe default for data location, stable-title rule for coalescing, write-on-close instead of batching |
