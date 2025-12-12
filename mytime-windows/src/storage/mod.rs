@@ -3,8 +3,11 @@
 //! Provides a StorageAdapter trait and SQLite implementation.
 //! Designed for future Supabase swap without rewriting core logic.
 
+#![allow(dead_code)] // Storage will be used in Phase 2
+
 mod sqlite;
 
+#[allow(unused_imports)]
 pub use sqlite::SqliteStorage;
 
 use crate::models::{AppSummary, DailySummary, Label, Segment};

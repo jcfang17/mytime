@@ -3,6 +3,8 @@
 //! These models are the canonical representation of time tracking data.
 //! Segments are the source of truth; sessions are derived.
 
+#![allow(dead_code)] // Models will be used in Phase 2
+
 use serde::{Deserialize, Serialize};
 
 /// A segment represents a contiguous period of time on a single window title.

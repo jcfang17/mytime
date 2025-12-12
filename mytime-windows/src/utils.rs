@@ -1,5 +1,7 @@
 //! Utility functions for MyTime
 
+#![allow(dead_code)] // Utils will be used in Phase 2
+
 use regex::Regex;
 use std::sync::LazyLock;
 

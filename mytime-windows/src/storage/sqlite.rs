@@ -559,10 +559,12 @@ impl StorageAdapter for SqliteStorage {
 
 #[cfg(test)]
 mod tests {
+    #[allow(unused_imports)]
     use super::*;
-    use std::time::{SystemTime, UNIX_EPOCH};
 
+    #[allow(dead_code)]
     fn now_ms() -> i64 {
+        use std::time::{SystemTime, UNIX_EPOCH};
         SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .unwrap()
