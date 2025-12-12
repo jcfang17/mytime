@@ -3,6 +3,10 @@
 extern crate native_windows_gui as nwg;
 extern crate native_windows_derive as nwd;
 
+mod models;
+mod storage;
+mod utils;
+
 use nwd::NwgUi;
 use nwg::NativeUi;
 use std::sync::{Arc, Mutex};
@@ -249,7 +253,7 @@ impl MyTimeApp {
         // Save entries
         if let Ok(mut entries) = self.time_entries.lock() {
             if !entries.is_empty() {
-                storage::save_to_csv(&entries).ok();
+                legacy_storage::save_to_csv(&entries).ok();
                 entries.clear();
             }
         }
@@ -802,7 +806,7 @@ mod tracker {
     }
 }
 
-mod storage {
+mod legacy_storage {
     use super::*;
     use std::fs::{metadata, File, OpenOptions};
     use std::io::{BufReader, Write};
@@ -907,7 +911,7 @@ fn main() {
     nwg::Font::set_global_family("Segoe UI").expect("Failed to set default font");
 
     // Load today's previous data
-    let today_stats = storage::load_today_stats();
+    let today_stats = legacy_storage::load_today_stats();
     let today_total: Duration = today_stats.values().map(|s| s.active_duration).sum();
 
     let app = MyTimeApp {
