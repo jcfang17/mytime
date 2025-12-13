@@ -102,61 +102,105 @@ pub struct MyTimeApp {
     font_small: nwg::Font,
 
     // Main window
-    #[nwg_control(size: (500, 450), position: (300, 200), title: "MyTime", flags: "WINDOW|VISIBLE|MINIMIZE_BOX|RESIZABLE|MAXIMIZE_BOX")]
+    #[nwg_control(size: (520, 480), position: (300, 200), title: "MyTime", flags: "WINDOW|VISIBLE|MINIMIZE_BOX|RESIZABLE|MAXIMIZE_BOX")]
     #[nwg_events(OnWindowClose: [MyTimeApp::on_close], OnWindowMinimize: [MyTimeApp::on_minimize])]
     window: nwg::Window,
 
-    // Layout
-    #[nwg_layout(parent: window, spacing: 8, margin: [20, 20, 20, 20])]
+    // Layout - 5 columns for better date nav proportions
+    #[nwg_layout(parent: window, spacing: 8, margin: [20, 20, 20, 20], max_column: Some(5))]
     layout: nwg::GridLayout,
 
     // Title/Status label
     #[nwg_control(text: "⏱ Stopped", font: Some(&data.font_title))]
-    #[nwg_layout_item(layout: layout, row: 0, col: 0, col_span: 2)]
+    #[nwg_layout_item(layout: layout, row: 0, col: 0, col_span: 5)]
     status_label: nwg::Label,
 
     // Time display - large and prominent
     #[nwg_control(text: "00:00:00", font: Some(&data.font_time))]
-    #[nwg_layout_item(layout: layout, row: 1, col: 0, col_span: 2)]
+    #[nwg_layout_item(layout: layout, row: 1, col: 0, col_span: 5)]
     time_label: nwg::Label,
 
     // Summary label - shows top app and stats
     #[nwg_control(text: "", font: Some(&data.font_small))]
-    #[nwg_layout_item(layout: layout, row: 2, col: 0, col_span: 2)]
+    #[nwg_layout_item(layout: layout, row: 2, col: 0, col_span: 5)]
     summary_label: nwg::Label,
 
     // Category breakdown label
     #[nwg_control(text: "", font: Some(&data.font_small))]
-    #[nwg_layout_item(layout: layout, row: 3, col: 0, col_span: 2)]
+    #[nwg_layout_item(layout: layout, row: 3, col: 0, col_span: 5)]
     category_label: nwg::Label,
 
     // Start button
     #[nwg_control(text: "▶ Start", font: Some(&data.font_normal))]
-    #[nwg_layout_item(layout: layout, row: 4, col: 0)]
+    #[nwg_layout_item(layout: layout, row: 4, col: 0, col_span: 2)]
     #[nwg_events(OnButtonClick: [MyTimeApp::on_start])]
     start_btn: nwg::Button,
 
     // Stop button
     #[nwg_control(text: "⏹ Stop", font: Some(&data.font_normal))]
-    #[nwg_layout_item(layout: layout, row: 4, col: 1)]
+    #[nwg_layout_item(layout: layout, row: 4, col: 2, col_span: 3)]
     #[nwg_events(OnButtonClick: [MyTimeApp::on_stop])]
     stop_btn: nwg::Button,
 
-    // Section label
-    #[nwg_control(text: "Application Usage", font: Some(&data.font_normal))]
+    // Date navigation - Previous button (narrow)
+    #[nwg_control(text: "◀", font: Some(&data.font_normal))]
     #[nwg_layout_item(layout: layout, row: 5, col: 0)]
+    #[nwg_events(OnButtonClick: [MyTimeApp::on_prev_day])]
+    prev_day_btn: nwg::Button,
+
+    // Date navigation - Date label (wide center)
+    #[nwg_control(text: "Today", font: Some(&data.font_normal), h_align: nwg::HTextAlign::Center)]
+    #[nwg_layout_item(layout: layout, row: 5, col: 1, col_span: 3)]
+    date_label: nwg::Label,
+
+    // Date navigation - Next button (narrow)
+    #[nwg_control(text: "▶", font: Some(&data.font_normal))]
+    #[nwg_layout_item(layout: layout, row: 5, col: 4)]
+    #[nwg_events(OnButtonClick: [MyTimeApp::on_next_day])]
+    next_day_btn: nwg::Button,
+
+    // Section label with checkbox
+    #[nwg_control(text: "Application Usage", font: Some(&data.font_small))]
+    #[nwg_layout_item(layout: layout, row: 6, col: 0, col_span: 2)]
     section_label: nwg::Label,
 
     // Active time only checkbox
-    #[nwg_control(text: "Active only", font: Some(&data.font_normal), check_state: nwg::CheckBoxState::Checked)]
-    #[nwg_layout_item(layout: layout, row: 5, col: 1)]
+    #[nwg_control(text: "Active only", font: Some(&data.font_small), check_state: nwg::CheckBoxState::Checked)]
+    #[nwg_layout_item(layout: layout, row: 6, col: 2, col_span: 3)]
     #[nwg_events(OnButtonClick: [MyTimeApp::on_toggle_hide_idle])]
     hide_idle_checkbox: nwg::CheckBox,
 
     // App usage list (columns are resizable by dragging header borders)
     #[nwg_control(list_style: nwg::ListViewStyle::Detailed, flags: "VISIBLE|TAB_STOP", ex_flags: nwg::ListViewExFlags::GRID | nwg::ListViewExFlags::FULL_ROW_SELECT)]
-    #[nwg_layout_item(layout: layout, row: 6, col: 0, col_span: 2, row_span: 4)]
+    #[nwg_layout_item(layout: layout, row: 7, col: 0, col_span: 5, row_span: 4)]
+    #[nwg_events(OnListViewRightClick: [MyTimeApp::on_app_list_right_click])]
     app_list: nwg::ListView,
+
+    // Context menu for changing app category
+    #[nwg_control(popup: true)]
+    category_menu: nwg::Menu,
+
+    #[nwg_control(parent: category_menu, text: "Set Category")]
+    category_menu_header: nwg::MenuItem,
+
+    #[nwg_control(parent: category_menu)]
+    category_menu_sep: nwg::MenuSeparator,
+
+    #[nwg_control(parent: category_menu, text: "🎬 Entertainment")]
+    #[nwg_events(OnMenuItemSelected: [MyTimeApp::on_set_category_entertainment])]
+    category_entertainment: nwg::MenuItem,
+
+    #[nwg_control(parent: category_menu, text: "💻 Development")]
+    #[nwg_events(OnMenuItemSelected: [MyTimeApp::on_set_category_development])]
+    category_development: nwg::MenuItem,
+
+    #[nwg_control(parent: category_menu, text: "📝 Productivity")]
+    #[nwg_events(OnMenuItemSelected: [MyTimeApp::on_set_category_productivity])]
+    category_productivity: nwg::MenuItem,
+
+    #[nwg_control(parent: category_menu, text: "💬 Communication")]
+    #[nwg_events(OnMenuItemSelected: [MyTimeApp::on_set_category_communication])]
+    category_communication: nwg::MenuItem,
 
     // Timer for UI updates
     #[nwg_control(interval: Duration::from_millis(1000))]
@@ -222,6 +266,10 @@ pub struct MyTimeApp {
     should_stop_tracking: Arc<AtomicBool>,
     tracking_thread: RefCell<Option<std::thread::JoinHandle<()>>>,
     hide_idle_sessions: RefCell<bool>,
+    // Selected day offset (0 = today, -1 = yesterday, etc.)
+    selected_day_offset: RefCell<i32>,
+    // Selected app for context menu (stores app_name, not friendly_name)
+    selected_app_for_category: RefCell<Option<String>>,
     // SQLite storage for new segment-based tracking
     sqlite_storage: Option<Arc<SqliteStorage>>,
 }
@@ -332,11 +380,12 @@ impl MyTimeApp {
     fn update_summary(&self) {
         // Try SQLite first
         if let Some(ref storage) = self.sqlite_storage {
-            let day_start_hour = storage.get_day_start_hour().unwrap_or(utils::DEFAULT_DAY_START_HOUR);
-            let today_start_ms = utils::today_start_ms_with_hour(day_start_hour);
-            let now_ms = utils::now_ms();
+            let (start_ms, end_ms) = self.get_selected_day_range();
+            // For today, use current time as end; for past days, use end of day
+            let offset = *self.selected_day_offset.borrow();
+            let end_ms = if offset == 0 { utils::now_ms() } else { end_ms };
 
-            match storage.get_app_breakdown(today_start_ms, now_ms) {
+            match storage.get_app_breakdown(start_ms, end_ms) {
                 Ok(summaries) => {
                     let filtered: Vec<_> = summaries
                         .iter()
@@ -354,9 +403,18 @@ impl MyTimeApp {
                     let top_app = filtered.first();
                     let app_count = filtered.len();
 
+                    // Calculate totals
+                    let total_ms: i64 = filtered.iter().map(|s| s.total_duration_ms).sum();
+                    let idle_ms: i64 = filtered.iter().map(|s| s.idle_duration_ms).sum();
+                    let active_ms = total_ms - idle_ms;
+
                     let summary = if let Some(app) = top_app {
-                        let time_str = utils::format_duration_ms(app.total_duration_ms);
-                        format!("Top: {} ({}) · {} apps today", app.friendly_name, time_str, app_count)
+                        let top_time = utils::format_duration_ms(app.total_duration_ms);
+                        let active_str = utils::format_duration_ms(active_ms);
+                        format!(
+                            "Active: {} · Top: {} ({}) · {} apps",
+                            active_str, app.friendly_name, top_time, app_count
+                        )
                     } else {
                         "No activity tracked yet".to_string()
                     };
@@ -408,38 +466,58 @@ impl MyTimeApp {
     fn update_category_breakdown(&self) {
         // Try SQLite first
         if let Some(ref storage) = self.sqlite_storage {
-            let today = chrono::Local::now().format("%Y-%m-%d").to_string();
+            let (start_ms, end_ms) = self.get_selected_day_range();
+            let offset = *self.selected_day_offset.borrow();
+            let end_ms = if offset == 0 { utils::now_ms() } else { end_ms };
 
-            if let Ok(summary) = storage.get_daily_summary(&today) {
-                if summary.category_breakdown.is_empty() {
+            // Get app breakdown and compute category totals directly
+            if let Ok(summaries) = storage.get_app_breakdown(start_ms, end_ms) {
+                // Aggregate by category
+                let mut category_totals: std::collections::HashMap<String, i64> =
+                    std::collections::HashMap::new();
+                for summary in &summaries {
+                    if let Some(cat) = &summary.primary_category {
+                        *category_totals.entry(cat.clone()).or_default() += summary.total_duration_ms;
+                    }
+                }
+
+                if category_totals.is_empty() {
                     self.category_label.set_text("");
                     return;
                 }
 
                 // Sort by duration (descending) and format
-                let mut categories: Vec<_> = summary.category_breakdown.clone();
+                let mut categories: Vec<_> = category_totals.into_iter().collect();
                 categories.sort_by(|a, b| b.1.cmp(&a.1));
+
+                // Calculate total for percentage
+                let total_ms: i64 = categories.iter()
+                    .filter(|(cat, _)| cat != "unknown")
+                    .map(|(_, ms)| *ms)
+                    .sum();
 
                 let parts: Vec<String> = categories
                     .iter()
                     .filter(|(cat, ms)| *ms >= 5000 && cat != "unknown") // At least 5s, skip unknown
-                    .take(4) // Show top 4 categories
+                    .take(3) // Show top 3 categories
                     .map(|(cat, ms)| {
-                        let emoji = match cat.as_str() {
-                            "entertainment" => "🎬",
-                            "development" => "💻",
-                            "productivity" => "📝",
-                            "communication" => "💬",
-                            _ => "❓",
+                        let (emoji, name) = match cat.as_str() {
+                            "entertainment" => ("🎬", "Entertainment"),
+                            "development" => ("💻", "Development"),
+                            "productivity" => ("📝", "Productivity"),
+                            "communication" => ("💬", "Communication"),
+                            _ => ("❓", "Other"),
                         };
-                        format!("{} {}", emoji, utils::format_duration_ms(*ms))
+                        let pct = if total_ms > 0 { (*ms * 100 / total_ms) as usize } else { 0 };
+                        let time_str = utils::format_duration_ms(*ms);
+                        format!("{} {} {} ({}%)", emoji, name, time_str, pct)
                     })
                     .collect();
 
                 if parts.is_empty() {
                     self.category_label.set_text("");
                 } else {
-                    self.category_label.set_text(&parts.join("  "));
+                    self.category_label.set_text(&parts.join("   "));
                 }
                 return;
             }
@@ -452,24 +530,35 @@ impl MyTimeApp {
     fn update_app_list(&self) {
         let show_all_time = !*self.hide_idle_sessions.borrow(); // Checkbox unchecked = show all
 
-        // Helper to populate list view
+        // Helper to get category emoji
+        let category_emoji = |cat: Option<&String>| -> &'static str {
+            match cat.map(|s| s.as_str()) {
+                Some("entertainment") => "🎬",
+                Some("development") => "💻",
+                Some("productivity") => "📝",
+                Some("communication") => "💬",
+                _ => "📁",
+            }
+        };
+
+        // Helper to populate list view - now includes category
         let populate_list = |app_list: &nwg::ListView, data: Vec<(String, i64, i64)>| {
+            // Ensure columns exist
+            if app_list.column_len() == 0 {
+                app_list.insert_column("Application");
+                app_list.insert_column("Time");
+                app_list.insert_column("Idle");
+                app_list.set_column_width(0, 220);
+                app_list.set_column_width(1, 80);
+                app_list.set_column_width(2, 100);
+            }
+
             let current_count = app_list.len();
             if current_count != data.len() || current_count == 0 {
                 app_list.clear();
 
-                // Ensure columns exist
-                if app_list.column_len() == 0 {
-                    app_list.insert_column("Application");
-                    app_list.insert_column("Active");
-                    app_list.insert_column("Idle");
-                    app_list.set_column_width(0, 150);
-                    app_list.set_column_width(1, 80);
-                    app_list.set_column_width(2, 110);
-                }
-
-                for (app, active_ms, idle_ms) in data.iter() {
-                    let active_str = utils::format_duration_ms(*active_ms);
+                for (app, time_ms, idle_ms) in data.iter() {
+                    let time_str = utils::format_duration_ms(*time_ms);
                     let idle_str = if *idle_ms > 0 {
                         format!("💤 {}", utils::format_duration_ms(*idle_ms))
                     } else {
@@ -486,7 +575,7 @@ impl MyTimeApp {
                     app_list.insert_item(nwg::InsertListViewItem {
                         index: Some(row_idx),
                         column_index: 1,
-                        text: Some(active_str),
+                        text: Some(time_str),
                         image: None,
                     });
                     app_list.insert_item(nwg::InsertListViewItem {
@@ -496,16 +585,55 @@ impl MyTimeApp {
                         image: None,
                     });
                 }
+                return;
+            }
+
+            // Row count is stable: update in-place
+            for (row_idx, (app, time_ms, idle_ms)) in data.iter().enumerate() {
+                let time_str = utils::format_duration_ms(*time_ms);
+                let idle_str = if *idle_ms > 0 {
+                    format!("💤 {}", utils::format_duration_ms(*idle_ms))
+                } else {
+                    "-".to_string()
+                };
+
+                app_list.update_item(
+                    row_idx,
+                    nwg::InsertListViewItem {
+                        index: None,
+                        column_index: 0,
+                        text: Some(app.clone()),
+                        image: None,
+                    },
+                );
+                app_list.update_item(
+                    row_idx,
+                    nwg::InsertListViewItem {
+                        index: None,
+                        column_index: 1,
+                        text: Some(time_str),
+                        image: None,
+                    },
+                );
+                app_list.update_item(
+                    row_idx,
+                    nwg::InsertListViewItem {
+                        index: None,
+                        column_index: 2,
+                        text: Some(idle_str),
+                        image: None,
+                    },
+                );
             }
         };
 
         // Try SQLite first
         if let Some(ref storage) = self.sqlite_storage {
-            let day_start_hour = storage.get_day_start_hour().unwrap_or(utils::DEFAULT_DAY_START_HOUR);
-            let today_start_ms = utils::today_start_ms_with_hour(day_start_hour);
-            let now_ms = utils::now_ms();
+            let (start_ms, end_ms) = self.get_selected_day_range();
+            let offset = *self.selected_day_offset.borrow();
+            let end_ms = if offset == 0 { utils::now_ms() } else { end_ms };
 
-            if let Ok(summaries) = storage.get_app_breakdown(today_start_ms, now_ms) {
+            if let Ok(summaries) = storage.get_app_breakdown(start_ms, end_ms) {
                 let mut filtered: Vec<(String, i64, i64)> = summaries
                     .iter()
                     .filter(|s| {
@@ -525,13 +653,15 @@ impl MyTimeApp {
                         } else {
                             active_ms
                         };
-                        (s.friendly_name.clone(), active_ms, s.idle_duration_ms, display_ms)
+                        // Add category emoji to app name
+                        let emoji = category_emoji(s.primary_category.as_ref());
+                        let app_with_cat = format!("{} {}", emoji, s.friendly_name);
+                        (app_with_cat, display_ms, s.idle_duration_ms)
                     })
-                    .filter(|(_, _, _, display)| *display >= 5000)
-                    .map(|(name, active, idle, _)| (name, active, idle))
+                    .filter(|(_, display, _)| *display >= 5000)
                     .collect();
 
-                // Sort by active time (most used first)
+                // Sort by displayed time (most used first)
                 filtered.sort_by(|a, b| b.1.cmp(&a.1));
 
                 populate_list(&self.app_list, filtered);
@@ -561,13 +691,13 @@ impl MyTimeApp {
                     } else {
                         stats.active_duration
                     };
-                    (friendly_name, display_duration, stats.active_duration, stats.idle_duration)
+                    (friendly_name, display_duration, stats.idle_duration)
                 })
-                .filter(|(_, display, _, _)| display.as_secs() >= 5)
-                .map(|(name, _, active, idle)| (name, active.as_millis() as i64, idle.as_millis() as i64))
+                .filter(|(_, display, _)| display.as_secs() >= 5)
+                .map(|(name, display, idle)| (name, display.as_millis() as i64, idle.as_millis() as i64))
                 .collect();
 
-            // Sort by active time
+            // Sort by displayed time
             filtered.sort_by(|a, b| b.1.cmp(&a.1));
 
             populate_list(&self.app_list, filtered);
@@ -746,15 +876,139 @@ impl MyTimeApp {
     fn on_toggle_hide_idle(&self) {
         let checked = self.hide_idle_checkbox.check_state() == nwg::CheckBoxState::Checked;
         *self.hide_idle_sessions.borrow_mut() = checked;
-        // Force refresh the app list
         self.app_list.clear();
-        if self.app_list.column_len() > 0 {
-            // Remove existing columns to force rebuild
-            while self.app_list.column_len() > 0 {
-                self.app_list.remove_column(0);
+        self.update_app_list();
+    }
+
+    fn on_prev_day(&self) {
+        let mut offset = self.selected_day_offset.borrow_mut();
+        *offset -= 1;
+        drop(offset);
+        self.update_date_label();
+        self.refresh_data_display();
+    }
+
+    fn on_next_day(&self) {
+        let mut offset = self.selected_day_offset.borrow_mut();
+        if *offset < 0 {
+            *offset += 1;
+        }
+        drop(offset);
+        self.update_date_label();
+        self.refresh_data_display();
+    }
+
+    fn update_date_label(&self) {
+        let offset = *self.selected_day_offset.borrow();
+        let label = utils::format_day_label(offset);
+        self.date_label.set_text(&label);
+
+        // Disable next button if we're at today
+        self.next_day_btn.set_enabled(offset < 0);
+    }
+
+    fn refresh_data_display(&self) {
+        self.app_list.clear();
+        self.update_summary();
+        self.update_category_breakdown();
+        self.update_app_list();
+    }
+
+    /// Get the time range for the currently selected day
+    fn get_selected_day_range(&self) -> (i64, i64) {
+        let offset = *self.selected_day_offset.borrow();
+        let day_start_hour = self.sqlite_storage
+            .as_ref()
+            .and_then(|s| s.get_day_start_hour().ok())
+            .unwrap_or(utils::DEFAULT_DAY_START_HOUR);
+        utils::day_range_ms_with_offset(day_start_hour, offset)
+    }
+
+    fn on_app_list_right_click(&self) {
+        // Get selected item
+        if let Some(idx) = self.app_list.selected_item() {
+            // Get the app name from the list (includes emoji prefix)
+            if let Some(item) = self.app_list.item(idx, 0, 256) {
+                // Extract app name without emoji (format is "🎬 AppName")
+                let friendly_name = item.text.trim_start_matches(|c: char| !c.is_alphanumeric() && c != '-' && c != '_').trim();
+
+                // Find the actual app_name by querying summaries
+                if let Some(ref storage) = self.sqlite_storage {
+                    let (start_ms, end_ms) = self.get_selected_day_range();
+                    let offset = *self.selected_day_offset.borrow();
+                    let end_ms = if offset == 0 { utils::now_ms() } else { end_ms };
+
+                    if let Ok(summaries) = storage.get_app_breakdown(start_ms, end_ms) {
+                        // Find matching app by friendly name
+                        if let Some(summary) = summaries.iter().find(|s| s.friendly_name == friendly_name) {
+                            *self.selected_app_for_category.borrow_mut() = Some(summary.app_name.clone());
+
+                            // Show context menu at cursor position
+                            let (x, y) = nwg::GlobalCursor::position();
+                            self.category_menu.popup(x, y);
+                            return;
+                        }
+                    }
+                }
             }
         }
-        self.update_app_list();
+    }
+
+    fn set_app_category(&self, category: &str) {
+        use crate::storage::StorageAdapter;
+
+        let app_name = self.selected_app_for_category.borrow().clone();
+        if let (Some(app_name), Some(ref storage)) = (app_name, &self.sqlite_storage) {
+            let (start_ms, end_ms) = self.get_selected_day_range();
+            let offset = *self.selected_day_offset.borrow();
+            let end_ms = if offset == 0 { utils::now_ms() } else { end_ms };
+
+            // Get all segments for this app to find unique title_hashes
+            if let Ok(segments) = storage.get_segments_range(start_ms, end_ms) {
+                let mut updated_hashes = std::collections::HashSet::new();
+
+                for segment in segments.iter().filter(|s| s.app_name == app_name) {
+                    if updated_hashes.contains(&segment.title_hash) {
+                        continue;
+                    }
+
+                    // Create/update user label for this title_hash
+                    let label = models::Label {
+                        title_hash: segment.title_hash.clone(),
+                        category: category.to_string(),
+                        source: models::LabelSource::User,
+                        confidence: None,
+                        updated_at: utils::now_ms(),
+                    };
+
+                    if storage.upsert_label(&label).is_ok() {
+                        updated_hashes.insert(segment.title_hash.clone());
+                    }
+                }
+
+                if !updated_hashes.is_empty() {
+                    // Refresh the display
+                    self.app_list.clear();
+                    self.refresh_data_display();
+                }
+            }
+        }
+    }
+
+    fn on_set_category_entertainment(&self) {
+        self.set_app_category("entertainment");
+    }
+
+    fn on_set_category_development(&self) {
+        self.set_app_category("development");
+    }
+
+    fn on_set_category_productivity(&self) {
+        self.set_app_category("productivity");
+    }
+
+    fn on_set_category_communication(&self) {
+        self.set_app_category("communication");
     }
 
     fn on_toggle_autostart(&self) {
@@ -925,9 +1179,6 @@ impl MyTimeApp {
 
                     // Force refresh
                     self.app_list.clear();
-                    while self.app_list.column_len() > 0 {
-                        self.app_list.remove_column(0);
-                    }
                     self.update_summary();
                     self.update_category_breakdown();
                     self.update_app_list();
@@ -1504,6 +1755,8 @@ fn main() {
         should_stop_tracking: Arc::new(AtomicBool::new(false)),
         tracking_thread: RefCell::new(None),
         hide_idle_sessions: RefCell::new(true), // Default: hide idle sessions
+        selected_day_offset: RefCell::new(0),   // Start at today
+        selected_app_for_category: RefCell::new(None),
         sqlite_storage,
         ..Default::default()
     };
@@ -1513,7 +1766,10 @@ fn main() {
     // Initialize UI state
     ui.stop_btn.set_enabled(false);
     ui.tray_stop.set_enabled(false);
+    ui.app_list.set_headers_enabled(true); // Show column headers
     ui.init_autostart_menu();
+    ui.update_date_label(); // Initialize date navigation
+    ui.next_day_btn.set_enabled(false); // Can't go to future
 
     // Update display with loaded data
     ui.update_app_list();

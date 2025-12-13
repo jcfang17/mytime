@@ -71,16 +71,43 @@ fn is_entertainment(app: &str, title: &str) -> bool {
         return true;
     }
 
-    // Gaming
+    // Gaming launchers
     if matches_any(app, &[
         "steam.exe", "epicgameslauncher.exe", "origin.exe",
-        "battle.net.exe", "riotclientservices.exe",
+        "battle.net.exe", "riotclientservices.exe", "eadesktop.exe",
+        "goggalaxy.exe", "ubisoft", "playnite",
+    ]) {
+        return true;
+    }
+
+    // Popular games (use specific exe names to avoid false positives)
+    if matches_any(app, &[
+        "bf6.exe", "bf2042.exe", "battlefield",
+        "cod.exe", "blackops", "modernwarfare", "warzone",
+        "valorant.exe", "valorant-win64", "league of legends", "leagueclient",
+        "csgo.exe", "cs2.exe", "counterstrike",
+        "dota2.exe", "overwatch.exe", "fortnite", "fortniteclient",
+        "minecraft", "gta5.exe", "gtav.exe", "playgtav", "rdr2.exe",
+        "eldenring", "cyberpunk2077", "baldursgate3", "bg3.exe",
+        "diablo", "pathofexile", "lostark", "newworld",
+        "apex.exe", "r5apex", "pubg", "destiny2", "halo", "starfield",
     ]) {
         return true;
     }
 
     // Gaming titles in browser
     if matches_any(title, &["steam", "epic games", "itch.io", "gog.com"]) {
+        return true;
+    }
+
+    // News and general browsing (often entertainment)
+    if matches_any(title, &[
+        "cnn", "bbc", "nytimes", "wsj", "theguardian", "reuters",
+        "buzzfeed", "9gag", "imgur", "giphy",
+        "hacker news", "product hunt",
+        "amazon prime video", "hbo max", "crunchyroll", "funimation",
+        "plex", "jellyfin", "emby",
+    ]) {
         return true;
     }
 
@@ -113,6 +140,13 @@ fn is_development(app: &str, title: &str) -> bool {
         "npmjs.com", "pypi.org", "rubygems.org", "maven", "gradle",
         "docker", "kubernetes", "jenkins", "circleci", "travis",
         "aws console", "azure portal", "google cloud",
+        // More dev sites
+        "mdn web docs", "mozilla developer", "w3schools", "devdocs",
+        "rust-lang.org", "python.org/doc", "go.dev", "nodejs.org",
+        "learn.microsoft", "vercel", "netlify", "heroku", "railway",
+        "supabase", "firebase", "mongodb", "postgresql", "redis",
+        "graphql", "postman", "swagger", "openapi",
+        "leetcode", "hackerrank", "codewars", "exercism",
     ]) {
         return true;
     }
@@ -122,6 +156,8 @@ fn is_development(app: &str, title: &str) -> bool {
         ".rs", ".py", ".js", ".ts", ".go", ".java", ".cpp", ".c",
         ".html", ".css", ".json", ".yaml", ".toml", ".md",
         "pull request", "merge request", "commit", "branch",
+        // More code patterns
+        "api", "debug", "error", "exception", "compile",
     ]) {
         return true;
     }
@@ -187,6 +223,24 @@ fn is_productivity(app: &str, title: &str) -> bool {
         return true;
     }
 
+    // Research and reference
+    if matches_any(title, &[
+        "wikipedia", "arxiv", "scholar.google", "researchgate",
+        "medium.com", "dev.to", "hashnode", "substack",
+        "pdf", "documentation", "manual", "guide", "tutorial",
+    ]) {
+        return true;
+    }
+
+    // Finance and work tools
+    if matches_any(title, &[
+        "quickbooks", "xero", "freshbooks", "invoice",
+        "salesforce", "hubspot", "zendesk", "intercom",
+        "airtable", "coda", "smartsheet",
+    ]) {
+        return true;
+    }
+
     false
 }
 
@@ -194,14 +248,14 @@ fn is_communication(app: &str, title: &str) -> bool {
     // Chat apps
     if matches_any(app, &[
         "slack.exe", "discord.exe", "teams.exe", "telegram.exe",
-        "signal.exe", "wechat.exe", "whatsapp.exe", "zoom.exe",
-        "skype.exe", "webex.exe",
+        "signal.exe", "wechat.exe", "weixin.exe", "whatsapp.exe", "zoom.exe",
+        "skype.exe", "webex.exe", "dingtalk.exe", "feishu.exe", "lark.exe",
     ]) {
         return true;
     }
 
     // Email
-    if matches_any(app, &["outlook.exe", "thunderbird.exe", "mailspring.exe"]) {
+    if matches_any(app, &["outlook.exe", "olk.exe", "thunderbird.exe", "mailspring.exe"]) {
         return true;
     }
 
