@@ -9,7 +9,7 @@ mod storage;
 mod tracker;
 mod utils;
 
-use models::{AppSummary, Label, LabelSource, TrackingState};
+use models::{AiSuggestion, AppSummary, ClassificationRule, ContextSummary, Label, LabelSource, MatchType, RuleSource, SuggestionStatus, TrackingState};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use storage::{SqliteStorage, StorageAdapter};
@@ -171,25 +171,36 @@ fn get_category_breakdown(
         end_ms
     };
 
-    let summaries = state
+    // Use segment-level category breakdown (not app-level)
+    // This properly handles browsers where different sites have different categories
+    state
         .storage
-        .get_app_breakdown(start_ms, end_ms)
-        .map_err(|e| e.to_string())?;
+        .get_segment_category_breakdown(start_ms, end_ms)
+        .map_err(|e| e.to_string())
+}
 
-    // Aggregate by category
-    let mut category_totals: std::collections::HashMap<String, i64> =
-        std::collections::HashMap::new();
-    for summary in &summaries {
-        if let Some(cat) = &summary.primary_category {
-            *category_totals.entry(cat.clone()).or_default() += summary.total_duration_ms;
-        }
-    }
+#[tauri::command]
+fn get_app_contexts(
+    state: State<AppState>,
+    app_name: String,
+    day_offset: i32,
+) -> Result<Vec<ContextSummary>, String> {
+    let day_start_hour = state
+        .storage
+        .get_day_start_hour()
+        .unwrap_or(utils::DEFAULT_DAY_START_HOUR);
+    let (start_ms, end_ms) = utils::day_range_ms_with_offset(day_start_hour, day_offset);
 
-    // Sort by duration descending
-    let mut categories: Vec<(String, i64)> = category_totals.into_iter().collect();
-    categories.sort_by(|a, b| b.1.cmp(&a.1));
+    let end_ms = if day_offset == 0 {
+        utils::now_ms()
+    } else {
+        end_ms
+    };
 
-    Ok(categories)
+    state
+        .storage
+        .get_app_contexts(&app_name, start_ms, end_ms)
+        .map_err(|e| e.to_string())
 }
 
 #[tauri::command]
@@ -375,6 +386,247 @@ fn set_autostart_enabled(app: AppHandle, enabled: bool) -> Result<(), String> {
     }
 }
 
+// === Classification Rules Commands ===
+
+#[tauri::command]
+fn get_rules(state: State<AppState>) -> Result<Vec<ClassificationRule>, String> {
+    // Use get_all_rules for UI to show all rules including disabled
+    state.storage.get_all_rules().map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+fn get_rule(state: State<AppState>, rule_id: String) -> Result<Option<ClassificationRule>, String> {
+    state.storage.get_rule(&rule_id).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+fn create_rule(
+    state: State<AppState>,
+    app_pattern: Option<String>,
+    title_pattern: Option<String>,
+    match_type: String,
+    category: String,
+    tags: Option<Vec<String>>,
+) -> Result<ClassificationRule, String> {
+    let rule = ClassificationRule {
+        rule_id: uuid::Uuid::new_v4().to_string(),
+        app_pattern,
+        title_pattern,
+        match_type: MatchType::from_str(&match_type),
+        category,
+        tags,
+        source: RuleSource::User,
+        priority: 0,
+        enabled: true,
+        created_at: utils::now_ms(),
+    };
+
+    state.storage.upsert_rule(&rule).map_err(|e| e.to_string())?;
+    Ok(rule)
+}
+
+#[tauri::command]
+fn update_rule(
+    state: State<AppState>,
+    rule_id: String,
+    app_pattern: Option<String>,
+    title_pattern: Option<String>,
+    match_type: String,
+    category: String,
+    tags: Option<Vec<String>>,
+    enabled: bool,
+    priority: i32,
+) -> Result<(), String> {
+    // Get existing rule to preserve source and created_at
+    let existing = state
+        .storage
+        .get_rule(&rule_id)
+        .map_err(|e| e.to_string())?
+        .ok_or_else(|| format!("Rule {} not found", rule_id))?;
+
+    let rule = ClassificationRule {
+        rule_id,
+        app_pattern,
+        title_pattern,
+        match_type: MatchType::from_str(&match_type),
+        category,
+        tags,
+        source: existing.source, // Preserve original source
+        priority,
+        enabled,
+        created_at: existing.created_at, // Preserve original creation time
+    };
+
+    state.storage.upsert_rule(&rule).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+fn delete_rule(state: State<AppState>, rule_id: String) -> Result<(), String> {
+    state.storage.delete_rule(&rule_id).map_err(|e| e.to_string())
+}
+
+/// Preview what segments a rule would match (for rule testing UI)
+#[tauri::command]
+fn preview_rule_matches(
+    state: State<AppState>,
+    app_pattern: Option<String>,
+    title_pattern: Option<String>,
+    match_type: String,
+    days_back: i32,
+) -> Result<RulePreview, String> {
+    let day_start_hour = state
+        .storage
+        .get_day_start_hour()
+        .unwrap_or(utils::DEFAULT_DAY_START_HOUR);
+
+    // Get segments from the last N days
+    let (start_ms, _) = utils::day_range_ms_with_offset(day_start_hour, -days_back);
+    let end_ms = utils::now_ms();
+
+    let segments = state
+        .storage
+        .get_segments_range(start_ms, end_ms)
+        .map_err(|e| e.to_string())?;
+
+    // Create a temporary rule for matching
+    let temp_rule = ClassificationRule {
+        rule_id: String::new(),
+        app_pattern: app_pattern.clone(),
+        title_pattern: title_pattern.clone(),
+        match_type: MatchType::from_str(&match_type),
+        category: String::new(),
+        tags: None,
+        source: RuleSource::User,
+        priority: 0,
+        enabled: true,
+        created_at: 0,
+    };
+
+    let mut match_count = 0;
+    let mut total_duration_ms: i64 = 0;
+    let mut sample_titles: Vec<String> = Vec::new();
+
+    for seg in &segments {
+        let title = seg.window_title.as_deref().unwrap_or("");
+        if temp_rule.matches(&seg.app_name, title) {
+            match_count += 1;
+            total_duration_ms += seg.end_time - seg.start_time;
+
+            // Collect up to 5 sample titles
+            if sample_titles.len() < 5 {
+                let sample = format!("{}: {}", seg.app_name, title);
+                if !sample_titles.contains(&sample) {
+                    sample_titles.push(sample);
+                }
+            }
+        }
+    }
+
+    Ok(RulePreview {
+        match_count,
+        total_duration_ms,
+        sample_titles,
+    })
+}
+
+/// Preview result for rule testing
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct RulePreview {
+    pub match_count: usize,
+    pub total_duration_ms: i64,
+    pub sample_titles: Vec<String>,
+}
+
+// === AI Suggestions Commands ===
+
+#[tauri::command]
+fn get_suggestions(state: State<AppState>) -> Result<Vec<AiSuggestion>, String> {
+    state
+        .storage
+        .get_pending_suggestions()
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+fn approve_suggestion(state: State<AppState>, suggestion_id: String) -> Result<ClassificationRule, String> {
+    // Get the suggestion
+    let suggestion = state
+        .storage
+        .get_suggestion(&suggestion_id)
+        .map_err(|e| e.to_string())?
+        .ok_or_else(|| format!("Suggestion {} not found", suggestion_id))?;
+
+    // Create a rule from the suggestion
+    let rule = ClassificationRule {
+        rule_id: uuid::Uuid::new_v4().to_string(),
+        app_pattern: suggestion.app_pattern,
+        title_pattern: suggestion.title_pattern,
+        match_type: suggestion.match_type,
+        category: suggestion.suggested_category,
+        tags: None,
+        source: RuleSource::AiApproved,
+        priority: 0,
+        enabled: true,
+        created_at: utils::now_ms(),
+    };
+
+    // Save the rule
+    state.storage.upsert_rule(&rule).map_err(|e| e.to_string())?;
+
+    // Mark suggestion as approved
+    state
+        .storage
+        .update_suggestion_status(&suggestion_id, SuggestionStatus::Approved)
+        .map_err(|e| e.to_string())?;
+
+    Ok(rule)
+}
+
+#[tauri::command]
+fn reject_suggestion(state: State<AppState>, suggestion_id: String) -> Result<(), String> {
+    state
+        .storage
+        .update_suggestion_status(&suggestion_id, SuggestionStatus::Rejected)
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+fn create_suggestion(
+    state: State<AppState>,
+    app_pattern: Option<String>,
+    title_pattern: Option<String>,
+    match_type: String,
+    suggested_category: String,
+    confidence: f64,
+    reason: String,
+    sample_titles: Vec<String>,
+    match_count: u32,
+    total_duration_ms: i64,
+) -> Result<AiSuggestion, String> {
+    let suggestion = AiSuggestion {
+        suggestion_id: uuid::Uuid::new_v4().to_string(),
+        app_pattern,
+        title_pattern,
+        match_type: MatchType::from_str(&match_type),
+        suggested_category,
+        confidence,
+        reason,
+        sample_titles,
+        match_count,
+        total_duration_ms,
+        status: SuggestionStatus::Pending,
+        created_at: utils::now_ms(),
+        reviewed_at: None,
+    };
+
+    state
+        .storage
+        .insert_suggestion(&suggestion)
+        .map_err(|e| e.to_string())?;
+
+    Ok(suggestion)
+}
+
 fn load_icon() -> Image<'static> {
     // Decode the PNG at compile time
     let icon_data = include_bytes!("../icons/32x32.png");
@@ -489,6 +741,7 @@ pub fn run() {
             get_tracking_state,
             get_app_breakdown,
             get_category_breakdown,
+            get_app_contexts,
             set_app_category,
             get_day_label,
             get_day_start_hour,
@@ -497,6 +750,18 @@ pub fn run() {
             format_duration,
             get_autostart_enabled,
             set_autostart_enabled,
+            // Classification rules
+            get_rules,
+            get_rule,
+            create_rule,
+            update_rule,
+            delete_rule,
+            preview_rule_matches,
+            // AI suggestions
+            get_suggestions,
+            approve_suggestion,
+            reject_suggestion,
+            create_suggestion,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

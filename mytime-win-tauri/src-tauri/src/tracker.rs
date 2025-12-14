@@ -3,7 +3,7 @@
 //! Tracks foreground window changes and emits segments.
 //! Implements the stable-title rule: wait 2s before finalizing a segment.
 
-use crate::categorizer::create_heuristic_label;
+use crate::categorizer::create_label;
 use crate::models::Segment;
 use crate::storage::{SqliteStorage, StorageAdapter};
 use crate::utils::{compute_title_hash, now_ms};
@@ -298,14 +298,13 @@ fn save_segment(
         eprintln!("Failed to save segment: {}", e);
     }
 
-    // Create and save heuristic label (only if we have a window title)
+    // Create and save label using rules first, then heuristics (only if we have a window title)
+    // Always upsert - labels table allows multiple rows per title_hash (one per source)
+    // The best_labels CTE in queries will pick the highest priority label
     if let Some(ref title) = segment.window_title {
-        let label = create_heuristic_label(&segment.title_hash, &segment.app_name, title);
-        // Only insert if no label exists yet for this title_hash
-        if let Ok(None) = storage.get_label(&segment.title_hash) {
-            if let Err(e) = storage.upsert_label(&label) {
-                eprintln!("Failed to save label: {}", e);
-            }
+        let label = create_label(storage, &segment.title_hash, &segment.app_name, title);
+        if let Err(e) = storage.upsert_label(&label) {
+            eprintln!("Failed to save label: {}", e);
         }
     }
 

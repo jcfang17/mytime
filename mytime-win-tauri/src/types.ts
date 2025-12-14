@@ -39,3 +39,59 @@ export const CATEGORY_INFO: Record<
 export function getCategoryInfo(category: string | null) {
   return CATEGORY_INFO[(category as Category) || "unknown"] || CATEGORY_INFO.unknown;
 }
+
+// === Classification Rules ===
+
+export type MatchType = "contains" | "prefix" | "exact" | "regex";
+
+export type RuleSource = "builtin" | "user" | "ai-approved";
+
+export interface ClassificationRule {
+  rule_id: string;
+  app_pattern: string | null;
+  title_pattern: string | null;
+  match_type: MatchType;
+  category: string;
+  tags: string[] | null;
+  source: RuleSource;
+  priority: number;
+  enabled: boolean;
+  created_at: number;
+}
+
+export interface RulePreview {
+  match_count: number;
+  total_duration_ms: number;
+  sample_titles: string[];
+}
+
+// === Context (for browser site/domain breakdown) ===
+
+export interface ContextSummary {
+  context: string;           // Site/domain extracted from title (e.g., "youtube", "github")
+  category: string | null;   // Category for this context
+  total_duration_ms: number;
+  idle_duration_ms: number;
+  segment_count: number;
+  sample_titles: string[];   // Up to 3 example window titles
+}
+
+// === AI Suggestions ===
+
+export type SuggestionStatus = "pending" | "approved" | "rejected" | "expired";
+
+export interface AiSuggestion {
+  suggestion_id: string;
+  app_pattern: string | null;
+  title_pattern: string | null;
+  match_type: MatchType;
+  suggested_category: string;
+  confidence: number;        // 0.0-1.0
+  reason: string;            // Why AI suggested this
+  sample_titles: string[];   // Example titles that would match
+  match_count: number;       // How many historical segments match
+  total_duration_ms: number; // Total time of matching segments
+  status: SuggestionStatus;
+  created_at: number;
+  reviewed_at: number | null;
+}

@@ -7,7 +7,8 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 MyTime is a cross-platform time tracking application with separate native implementations for each platform:
 
 - **mytime-macos/** - macOS version using Swift/SwiftUI
-- **mytime-windows/** - Windows version using Rust/egui  
+- **mytime-windows/** - Windows version using Rust/egui (legacy)
+- **mytime-win-tauri/** - Windows version using Tauri + React (current)
 - **Future:** iOS and Android versions will follow the same pattern
 
 Each platform has its own directory with independent codebases tailored to platform-specific capabilities.
@@ -43,6 +44,36 @@ When implementing features that involve cross-thread communication (e.g., system
 - `src/main.rs` - Main application entry, egui setup, window management
 - `src/tray.rs` - System tray integration
 - `Cargo.toml` - Dependencies and build configuration
+
+### Windows Tauri Version (mytime-win-tauri)
+
+**Technology Stack:**
+- Backend: Rust with Tauri 2.x
+- Frontend: React + TypeScript + Vite
+- Package Manager: **pnpm** (NOT npm)
+- Data Storage: SQLite
+
+**Build & Run Commands:**
+```bash
+cd mytime-win-tauri
+pnpm install              # Install dependencies
+pnpm tauri dev            # Run in development mode
+pnpm tauri build          # Build release version
+pnpm build                # Build frontend only (tsc + vite)
+
+# Rust-only commands
+cd src-tauri
+cargo test                # Run Rust tests
+cargo check               # Check compilation
+```
+
+**Key Files:**
+- `src/App.tsx` - Main React application
+- `src/api.ts` - Tauri command bindings
+- `src/types.ts` - TypeScript type definitions
+- `src-tauri/src/lib.rs` - Tauri commands
+- `src-tauri/src/storage/sqlite.rs` - SQLite storage implementation
+- `src-tauri/src/tracker.rs` - Window tracking logic
 
 ### macOS Version (mytime-macos)
 

@@ -14,8 +14,17 @@ import {
   getAutostartEnabled,
   setAutostartEnabled,
   formatDurationLocal,
+  getRules,
+  createRule,
+  updateRule,
+  deleteRule,
+  previewRuleMatches,
+  getSuggestions,
+  approveSuggestion,
+  rejectSuggestion,
+  getAppContexts,
 } from "./api";
-import type { TrackingState, AppSummary, Category } from "./types";
+import type { TrackingState, AppSummary, Category, ClassificationRule, MatchType, RulePreview, AiSuggestion, ContextSummary } from "./types";
 import { getCategoryInfo, CATEGORY_INFO } from "./types";
 import "./App.css";
 
@@ -42,6 +51,27 @@ function App() {
   const [dayStartHour, setDayStartHourState] = useState(6);
   const [autostartEnabled, setAutostartEnabledState] = useState(false);
   const [exportStatus, setExportStatus] = useState<string | null>(null);
+
+  // Rules state
+  const [rules, setRules] = useState<ClassificationRule[]>([]);
+  const [editingRule, setEditingRule] = useState<ClassificationRule | null>(null);
+  const [showRuleForm, setShowRuleForm] = useState(false);
+  const [ruleForm, setRuleForm] = useState({
+    appPattern: "",
+    titlePattern: "",
+    matchType: "contains" as MatchType,
+    category: "productivity",
+  });
+  const [rulePreview, setRulePreview] = useState<RulePreview | null>(null);
+  const [previewLoading, setPreviewLoading] = useState(false);
+
+  // Suggestions state
+  const [suggestions, setSuggestions] = useState<AiSuggestion[]>([]);
+
+  // Context drill-down state
+  const [expandedApp, setExpandedApp] = useState<string | null>(null);
+  const [appContexts, setAppContexts] = useState<ContextSummary[]>([]);
+  const [contextsLoading, setContextsLoading] = useState(false);
 
   // Load tracking state (fast poll)
   const loadTrackingState = useCallback(async () => {
@@ -83,12 +113,34 @@ function App() {
     }
   }, []);
 
+  // Load rules
+  const loadRules = useCallback(async () => {
+    try {
+      const rulesData = await getRules();
+      setRules(rulesData);
+    } catch (err) {
+      console.error("Failed to load rules:", err);
+    }
+  }, []);
+
+  // Load suggestions
+  const loadSuggestions = useCallback(async () => {
+    try {
+      const suggestionsData = await getSuggestions();
+      setSuggestions(suggestionsData);
+    } catch (err) {
+      console.error("Failed to load suggestions:", err);
+    }
+  }, []);
+
   // Initial load
   useEffect(() => {
     loadTrackingState();
     loadBreakdown();
     loadSettings();
-  }, [loadTrackingState, loadBreakdown, loadSettings]);
+    loadRules();
+    loadSuggestions();
+  }, [loadTrackingState, loadBreakdown, loadSettings, loadRules, loadSuggestions]);
 
   // Fast poll for tracking state (1s)
   useEffect(() => {
@@ -206,6 +258,179 @@ function App() {
       setExportStatus("Export failed");
       setTimeout(() => setExportStatus(null), 3000);
     }
+  };
+
+  // Rule handlers
+  const handleAddRule = () => {
+    setEditingRule(null);
+    setRuleForm({
+      appPattern: "",
+      titlePattern: "",
+      matchType: "contains",
+      category: "productivity",
+    });
+    setRulePreview(null);
+    setShowRuleForm(true);
+  };
+
+  const handleEditRule = (rule: ClassificationRule) => {
+    setEditingRule(rule);
+    setRuleForm({
+      appPattern: rule.app_pattern || "",
+      titlePattern: rule.title_pattern || "",
+      matchType: rule.match_type,
+      category: rule.category,
+    });
+    setRulePreview(null);
+    setShowRuleForm(true);
+  };
+
+  const handleDeleteRule = async (ruleId: string) => {
+    try {
+      await deleteRule(ruleId);
+      loadRules();
+      loadBreakdown(); // Refresh to show new categorizations
+    } catch (err) {
+      console.error("Failed to delete rule:", err);
+    }
+  };
+
+  const handleSaveRule = async () => {
+    try {
+      const appPattern = ruleForm.appPattern.trim() || null;
+      const titlePattern = ruleForm.titlePattern.trim() || null;
+
+      if (!appPattern && !titlePattern) {
+        alert("Please enter at least an app pattern or title pattern");
+        return;
+      }
+
+      if (editingRule) {
+        await updateRule(
+          editingRule.rule_id,
+          appPattern,
+          titlePattern,
+          ruleForm.matchType,
+          ruleForm.category,
+          null, // tags
+          editingRule.enabled,
+          editingRule.priority
+        );
+      } else {
+        await createRule(
+          appPattern,
+          titlePattern,
+          ruleForm.matchType,
+          ruleForm.category,
+          null // tags
+        );
+      }
+
+      setShowRuleForm(false);
+      loadRules();
+      loadBreakdown(); // Refresh to show new categorizations
+    } catch (err) {
+      console.error("Failed to save rule:", err);
+    }
+  };
+
+  const handlePreviewRule = async () => {
+    const appPattern = ruleForm.appPattern.trim() || null;
+    const titlePattern = ruleForm.titlePattern.trim() || null;
+
+    if (!appPattern && !titlePattern) {
+      setRulePreview(null);
+      return;
+    }
+
+    try {
+      setPreviewLoading(true);
+      const preview = await previewRuleMatches(
+        appPattern,
+        titlePattern,
+        ruleForm.matchType,
+        7 // Look back 7 days
+      );
+      setRulePreview(preview);
+    } catch (err) {
+      console.error("Failed to preview rule:", err);
+    } finally {
+      setPreviewLoading(false);
+    }
+  };
+
+  const handleToggleRule = async (rule: ClassificationRule) => {
+    try {
+      await updateRule(
+        rule.rule_id,
+        rule.app_pattern,
+        rule.title_pattern,
+        rule.match_type,
+        rule.category,
+        rule.tags,
+        !rule.enabled,
+        rule.priority
+      );
+      loadRules();
+    } catch (err) {
+      console.error("Failed to toggle rule:", err);
+    }
+  };
+
+  // Suggestion handlers
+  const handleApproveSuggestion = async (suggestionId: string) => {
+    try {
+      await approveSuggestion(suggestionId);
+      loadSuggestions();
+      loadRules(); // New rule was created
+      loadBreakdown(); // Categories might have changed
+    } catch (err) {
+      console.error("Failed to approve suggestion:", err);
+    }
+  };
+
+  const handleRejectSuggestion = async (suggestionId: string) => {
+    try {
+      await rejectSuggestion(suggestionId);
+      loadSuggestions();
+    } catch (err) {
+      console.error("Failed to reject suggestion:", err);
+    }
+  };
+
+  // Context drill-down handlers
+  const handleToggleAppExpand = async (appName: string) => {
+    if (expandedApp === appName) {
+      // Collapse
+      setExpandedApp(null);
+      setAppContexts([]);
+    } else {
+      // Expand and load contexts
+      setExpandedApp(appName);
+      setContextsLoading(true);
+      try {
+        const contexts = await getAppContexts(appName, dayOffset);
+        setAppContexts(contexts);
+      } catch (err) {
+        console.error("Failed to load app contexts:", err);
+        setAppContexts([]);
+      } finally {
+        setContextsLoading(false);
+      }
+    }
+  };
+
+  const handleCreateRuleFromContext = (context: ContextSummary, appName: string) => {
+    // Pre-fill the rule form with this context
+    setEditingRule(null);
+    setRuleForm({
+      appPattern: appName,
+      titlePattern: context.context,
+      matchType: "contains",
+      category: context.category || "productivity",
+    });
+    setRulePreview(null);
+    setShowRuleForm(true);
   };
 
   // Calculate display time
@@ -364,24 +589,81 @@ function App() {
                   </div>
                   {filteredApps.map((app) => {
                     const catInfo = getCategoryInfo(app.primary_category);
+                    const isBrowser = /^(msedge|chrome|firefox|brave|opera|vivaldi|arc|safari)/i.test(
+                      app.app_name
+                    );
+                    const isExpanded = expandedApp === app.app_name;
                     return (
-                      <div
-                        key={app.app_name}
-                        className="app-row"
-                        onContextMenu={(e) => handleContextMenu(e, app.app_name)}
-                      >
-                        <span className="app-name">
-                          <span className="app-icon">{catInfo.emoji}</span>
-                          {app.friendly_name}
-                        </span>
-                        <span className="app-time">
-                          {formatDurationLocal(app.displayMs)}
-                        </span>
-                        <span className="app-idle">
-                          {app.idle_duration_ms > 0
-                            ? `💤 ${formatDurationLocal(app.idle_duration_ms)}`
-                            : "-"}
-                        </span>
+                      <div key={app.app_name} className="app-row-container">
+                        <div
+                          className={`app-row ${isExpanded ? "expanded" : ""}`}
+                          onContextMenu={(e) => handleContextMenu(e, app.app_name)}
+                          onClick={isBrowser ? () => handleToggleAppExpand(app.app_name) : undefined}
+                          style={isBrowser ? { cursor: "pointer" } : undefined}
+                        >
+                          <span className="app-name">
+                            {isBrowser && (
+                              <span className="expand-icon">
+                                {isExpanded ? "▼" : "▶"}
+                              </span>
+                            )}
+                            <span className="app-icon">{catInfo.emoji}</span>
+                            {app.friendly_name}
+                          </span>
+                          <span className="app-time">
+                            {formatDurationLocal(app.displayMs)}
+                          </span>
+                          <span className="app-idle">
+                            {app.idle_duration_ms > 0
+                              ? `💤 ${formatDurationLocal(app.idle_duration_ms)}`
+                              : "-"}
+                          </span>
+                        </div>
+                        {/* Context drill-down for browsers */}
+                        {isExpanded && (
+                          <div className="context-list">
+                            {contextsLoading ? (
+                              <div className="context-loading">Loading...</div>
+                            ) : appContexts.length === 0 ? (
+                              <div className="context-empty">No site data</div>
+                            ) : (
+                              appContexts
+                                .filter((ctx) => {
+                                  const activeMs = showActiveOnly
+                                    ? ctx.total_duration_ms - ctx.idle_duration_ms
+                                    : ctx.total_duration_ms;
+                                  return activeMs >= 5000;
+                                })
+                                .map((ctx) => {
+                                  const ctxCatInfo = getCategoryInfo(ctx.category);
+                                  const ctxDisplayMs = showActiveOnly
+                                    ? ctx.total_duration_ms - ctx.idle_duration_ms
+                                    : ctx.total_duration_ms;
+                                  return (
+                                    <div key={ctx.context} className="context-row">
+                                      <span className="context-name">
+                                        <span className="context-icon">{ctxCatInfo.emoji}</span>
+                                        {ctx.context}
+                                      </span>
+                                      <span className="context-time">
+                                        {formatDurationLocal(ctxDisplayMs)}
+                                      </span>
+                                      {/* Hide + Rule for "other" since it won't match anything */}
+                                      {ctx.context !== "other" && (
+                                        <button
+                                          className="btn btn-sm"
+                                          onClick={() => handleCreateRuleFromContext(ctx, app.app_name)}
+                                          title="Create rule for this site"
+                                        >
+                                          + Rule
+                                        </button>
+                                      )}
+                                    </div>
+                                  );
+                                })
+                            )}
+                          </div>
+                        )}
                       </div>
                     );
                   })}
@@ -448,12 +730,265 @@ function App() {
               </div>
             </section>
 
+            {/* AI Suggestions */}
+            {suggestions.length > 0 && (
+              <section className="setting-section">
+                <h3>AI Suggestions</h3>
+                <p className="setting-description">
+                  Review AI-generated categorization suggestions. Approve to create a rule, or reject to dismiss.
+                </p>
+
+                <div className="suggestions-list">
+                  {suggestions.map((suggestion) => {
+                    const catInfo = getCategoryInfo(suggestion.suggested_category);
+                    return (
+                      <div key={suggestion.suggestion_id} className="suggestion-item">
+                        <div className="suggestion-info">
+                          <div className="suggestion-header">
+                            <span className="suggestion-category">
+                              {catInfo.emoji} {catInfo.label}
+                            </span>
+                            <span className="suggestion-confidence">
+                              {Math.round(suggestion.confidence * 100)}% confident
+                            </span>
+                          </div>
+                          <div className="suggestion-pattern">
+                            {suggestion.app_pattern && (
+                              <span className="pattern-badge">
+                                App: {suggestion.app_pattern}
+                              </span>
+                            )}
+                            {suggestion.title_pattern && (
+                              <span className="pattern-badge">
+                                Title: {suggestion.title_pattern}
+                              </span>
+                            )}
+                          </div>
+                          <p className="suggestion-reason">{suggestion.reason}</p>
+                          <div className="suggestion-stats">
+                            <span>{suggestion.match_count} matches</span>
+                            <span>{formatDurationLocal(suggestion.total_duration_ms)} total</span>
+                          </div>
+                          {suggestion.sample_titles.length > 0 && (
+                            <ul className="suggestion-samples">
+                              {suggestion.sample_titles.slice(0, 3).map((title, i) => (
+                                <li key={i}>{title}</li>
+                              ))}
+                            </ul>
+                          )}
+                        </div>
+                        <div className="suggestion-actions">
+                          <button
+                            className="btn btn-sm btn-success"
+                            onClick={() => handleApproveSuggestion(suggestion.suggestion_id)}
+                            title="Approve - create rule"
+                          >
+                            ✓ Approve
+                          </button>
+                          <button
+                            className="btn btn-sm btn-danger"
+                            onClick={() => handleRejectSuggestion(suggestion.suggestion_id)}
+                            title="Reject - dismiss suggestion"
+                          >
+                            ✗ Reject
+                          </button>
+                        </div>
+                      </div>
+                    );
+                  })}
+                </div>
+              </section>
+            )}
+
+            <section className="setting-section">
+              <h3>Classification Rules</h3>
+              <p className="setting-description">
+                Create rules to automatically categorize apps and websites based on patterns.
+              </p>
+
+              {/* Rule list */}
+              <div className="rules-list">
+                {rules.length === 0 ? (
+                  <p className="no-data">No rules defined yet</p>
+                ) : (
+                  rules.map((rule) => {
+                    const catInfo = getCategoryInfo(rule.category);
+                    return (
+                      <div
+                        key={rule.rule_id}
+                        className={`rule-item ${!rule.enabled ? "disabled" : ""}`}
+                      >
+                        <div className="rule-info">
+                          <span className="rule-category">
+                            {catInfo.emoji} {catInfo.label}
+                          </span>
+                          <span className="rule-pattern">
+                            {rule.app_pattern && (
+                              <span className="pattern-badge">
+                                App: {rule.app_pattern}
+                              </span>
+                            )}
+                            {rule.title_pattern && (
+                              <span className="pattern-badge">
+                                Title: {rule.title_pattern}
+                              </span>
+                            )}
+                            <span className="match-type">({rule.match_type})</span>
+                          </span>
+                          <span className="rule-source">{rule.source}</span>
+                        </div>
+                        <div className="rule-actions">
+                          <button
+                            className="btn btn-sm"
+                            onClick={() => handleToggleRule(rule)}
+                            title={rule.enabled ? "Disable" : "Enable"}
+                          >
+                            {rule.enabled ? "✓" : "○"}
+                          </button>
+                          <button
+                            className="btn btn-sm"
+                            onClick={() => handleEditRule(rule)}
+                            title="Edit"
+                          >
+                            ✏️
+                          </button>
+                          <button
+                            className="btn btn-sm btn-danger"
+                            onClick={() => handleDeleteRule(rule.rule_id)}
+                            title="Delete"
+                          >
+                            🗑️
+                          </button>
+                        </div>
+                      </div>
+                    );
+                  })
+                )}
+              </div>
+
+              <button className="btn btn-primary" onClick={handleAddRule}>
+                + Add Rule
+              </button>
+            </section>
+
             <section className="setting-section">
               <h3>About</h3>
               <p className="setting-description">
                 MyTime v0.1.0 - Personal Time Tracking
               </p>
             </section>
+          </div>
+        )}
+
+        {/* Rule form modal */}
+        {showRuleForm && (
+          <div className="modal-overlay" onClick={() => setShowRuleForm(false)}>
+            <div className="modal" onClick={(e) => e.stopPropagation()}>
+              <h3>{editingRule ? "Edit Rule" : "Add Rule"}</h3>
+
+              <div className="form-group">
+                <label>App Pattern</label>
+                <input
+                  type="text"
+                  value={ruleForm.appPattern}
+                  onChange={(e) =>
+                    setRuleForm({ ...ruleForm, appPattern: e.target.value })
+                  }
+                  placeholder="e.g., msedge, chrome, code"
+                />
+                <span className="form-help">Match app name (exe filename)</span>
+              </div>
+
+              <div className="form-group">
+                <label>Title Pattern</label>
+                <input
+                  type="text"
+                  value={ruleForm.titlePattern}
+                  onChange={(e) =>
+                    setRuleForm({ ...ruleForm, titlePattern: e.target.value })
+                  }
+                  placeholder="e.g., YouTube, GitHub, Slack"
+                />
+                <span className="form-help">Match window title text</span>
+              </div>
+
+              <div className="form-group">
+                <label>Match Type</label>
+                <select
+                  value={ruleForm.matchType}
+                  onChange={(e) =>
+                    setRuleForm({
+                      ...ruleForm,
+                      matchType: e.target.value as MatchType,
+                    })
+                  }
+                >
+                  <option value="contains">Contains</option>
+                  <option value="prefix">Starts with</option>
+                  <option value="exact">Exact match</option>
+                  <option value="regex">Regex</option>
+                </select>
+              </div>
+
+              <div className="form-group">
+                <label>Category</label>
+                <select
+                  value={ruleForm.category}
+                  onChange={(e) =>
+                    setRuleForm({ ...ruleForm, category: e.target.value })
+                  }
+                >
+                  {(Object.keys(CATEGORY_INFO) as Category[])
+                    .filter((cat) => cat !== "unknown")
+                    .map((cat) => {
+                      const info = CATEGORY_INFO[cat];
+                      return (
+                        <option key={cat} value={cat}>
+                          {info.emoji} {info.label}
+                        </option>
+                      );
+                    })}
+                </select>
+              </div>
+
+              {/* Preview */}
+              <div className="rule-preview">
+                <button
+                  className="btn btn-secondary"
+                  onClick={handlePreviewRule}
+                  disabled={previewLoading}
+                >
+                  {previewLoading ? "Loading..." : "Preview Matches"}
+                </button>
+                {rulePreview && (
+                  <div className="preview-result">
+                    <p>
+                      <strong>{rulePreview.match_count}</strong> matches (
+                      {formatDurationLocal(rulePreview.total_duration_ms)} total)
+                    </p>
+                    {rulePreview.sample_titles.length > 0 && (
+                      <ul className="sample-titles">
+                        {rulePreview.sample_titles.slice(0, 3).map((title, i) => (
+                          <li key={i}>{title}</li>
+                        ))}
+                      </ul>
+                    )}
+                  </div>
+                )}
+              </div>
+
+              <div className="modal-actions">
+                <button
+                  className="btn btn-secondary"
+                  onClick={() => setShowRuleForm(false)}
+                >
+                  Cancel
+                </button>
+                <button className="btn btn-primary" onClick={handleSaveRule}>
+                  {editingRule ? "Update" : "Create"}
+                </button>
+              </div>
+            </div>
           </div>
         )}
       </main>

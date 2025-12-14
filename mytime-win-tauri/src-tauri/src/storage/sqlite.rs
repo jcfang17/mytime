@@ -1,7 +1,8 @@
 //! SQLite storage implementation for MyTime
 
 use crate::models::{
-    AppSummary, BootstrapConfig, DailySummary, DataLocation, Label, LabelSource, Segment,
+    AiSuggestion, AppSummary, BootstrapConfig, ClassificationRule, ContextSummary, DailySummary,
+    DataLocation, Label, LabelSource, MatchType, RuleSource, Segment, SuggestionStatus,
 };
 use crate::storage::{StorageAdapter, StorageResult};
 use crate::utils;
@@ -131,7 +132,7 @@ impl SqliteStorage {
         self.set_config("day_start_hour", &hour.to_string())
     }
 
-    /// Run SQL migration
+    /// Run SQL migration v001 - initial schema
     fn run_migration_v001(conn: &Connection) -> StorageResult<()> {
         conn.execute_batch(
             r#"
@@ -181,6 +182,63 @@ impl SqliteStorage {
                 version INTEGER PRIMARY KEY,
                 applied_at INTEGER NOT NULL
             );
+            "#,
+        )?;
+
+        Ok(())
+    }
+
+    /// Run SQL migration v002 - classification rules
+    fn run_migration_v002(conn: &Connection) -> StorageResult<()> {
+        conn.execute_batch(
+            r#"
+            -- Classification rules table: pattern-based categorization
+            CREATE TABLE IF NOT EXISTS classification_rules (
+                rule_id TEXT PRIMARY KEY,
+                app_pattern TEXT,           -- NULL = match any app
+                title_pattern TEXT,         -- NULL = match any title
+                match_type TEXT NOT NULL DEFAULT 'contains',  -- contains, prefix, exact, regex
+                category TEXT NOT NULL,
+                tags TEXT,                  -- JSON array of tags
+                source TEXT NOT NULL DEFAULT 'user',  -- builtin, user, ai-approved
+                priority INTEGER DEFAULT 0, -- Additional priority within same source
+                enabled INTEGER DEFAULT 1,
+                created_at INTEGER NOT NULL
+            );
+
+            -- Index for enabled rules
+            CREATE INDEX IF NOT EXISTS idx_rules_enabled ON classification_rules(enabled);
+            CREATE INDEX IF NOT EXISTS idx_rules_source ON classification_rules(source);
+            "#,
+        )?;
+
+        Ok(())
+    }
+
+    /// Run SQL migration v003 - AI suggestions
+    fn run_migration_v003(conn: &Connection) -> StorageResult<()> {
+        conn.execute_batch(
+            r#"
+            -- AI suggestions table: pending AI categorization suggestions
+            CREATE TABLE IF NOT EXISTS ai_suggestions (
+                suggestion_id TEXT PRIMARY KEY,
+                app_pattern TEXT,
+                title_pattern TEXT,
+                match_type TEXT NOT NULL DEFAULT 'contains',
+                suggested_category TEXT NOT NULL,
+                confidence REAL NOT NULL,
+                reason TEXT NOT NULL,
+                sample_titles TEXT,         -- JSON array
+                match_count INTEGER DEFAULT 0,
+                total_duration_ms INTEGER DEFAULT 0,
+                status TEXT NOT NULL DEFAULT 'pending',  -- pending, approved, rejected, expired
+                created_at INTEGER NOT NULL,
+                reviewed_at INTEGER
+            );
+
+            -- Index for pending suggestions
+            CREATE INDEX IF NOT EXISTS idx_suggestions_status ON ai_suggestions(status);
+            CREATE INDEX IF NOT EXISTS idx_suggestions_created ON ai_suggestions(created_at);
             "#,
         )?;
 
@@ -460,15 +518,29 @@ impl StorageAdapter for SqliteStorage {
             .collect::<Result<Vec<_>, _>>()?;
 
         // Now compute dominant category by duration for each app
+        // Use a subquery to get the best label per title_hash (user > ai > heuristic)
         let mut cat_stmt = conn.prepare(
             r#"
-            SELECT l.category, SUM(s.end_time - s.start_time) as cat_duration
+            WITH best_labels AS (
+                SELECT title_hash, category,
+                       ROW_NUMBER() OVER (
+                           PARTITION BY title_hash
+                           ORDER BY CASE source
+                               WHEN 'user' THEN 1
+                               WHEN 'ai' THEN 2
+                               WHEN 'heuristic' THEN 3
+                               ELSE 4
+                           END
+                       ) as rn
+                FROM labels
+            )
+            SELECT bl.category, SUM(s.end_time - s.start_time) as cat_duration
             FROM segments s
-            LEFT JOIN labels l ON l.title_hash = s.title_hash
+            LEFT JOIN best_labels bl ON bl.title_hash = s.title_hash AND bl.rn = 1
             WHERE s.start_time >= ?1 AND s.start_time < ?2
               AND s.app_name = ?3
-              AND l.category IS NOT NULL
-            GROUP BY l.category
+              AND bl.category IS NOT NULL
+            GROUP BY bl.category
             ORDER BY cat_duration DESC
             LIMIT 1
             "#,
@@ -484,6 +556,160 @@ impl StorageAdapter for SqliteStorage {
         }
 
         Ok(summaries)
+    }
+
+    fn get_segment_category_breakdown(
+        &self,
+        start_ms: i64,
+        end_ms: i64,
+    ) -> StorageResult<Vec<(String, i64)>> {
+        let conn = self.conn.lock().map_err(|e| e.to_string())?;
+
+        // Aggregate duration by segment-level category (using best label per title_hash)
+        // This properly handles browsers where YouTube=entertainment and Overleaf=productivity
+        let mut stmt = conn.prepare(
+            r#"
+            WITH best_labels AS (
+                SELECT title_hash, category,
+                       ROW_NUMBER() OVER (
+                           PARTITION BY title_hash
+                           ORDER BY CASE source
+                               WHEN 'user' THEN 1
+                               WHEN 'ai' THEN 2
+                               WHEN 'heuristic' THEN 3
+                               ELSE 4
+                           END
+                       ) as rn
+                FROM labels
+            )
+            SELECT COALESCE(bl.category, 'unknown') as cat,
+                   SUM(s.end_time - s.start_time) as duration_ms
+            FROM segments s
+            LEFT JOIN best_labels bl ON bl.title_hash = s.title_hash AND bl.rn = 1
+            WHERE s.start_time >= ?1 AND s.start_time < ?2
+            GROUP BY cat
+            ORDER BY duration_ms DESC
+            "#,
+        )?;
+
+        let categories = stmt
+            .query_map(params![start_ms, end_ms], |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?))
+            })?
+            .collect::<Result<Vec<_>, _>>()?;
+
+        Ok(categories)
+    }
+
+    fn get_app_contexts(
+        &self,
+        app_name: &str,
+        start_ms: i64,
+        end_ms: i64,
+    ) -> StorageResult<Vec<ContextSummary>> {
+        let conn = self.conn.lock().map_err(|e| e.to_string())?;
+
+        // Get all segments for this app in the time range
+        // Use a CTE to get the best label per title_hash (user > ai > heuristic)
+        let mut stmt = conn.prepare(
+            r#"
+            WITH best_labels AS (
+                SELECT title_hash, category,
+                       ROW_NUMBER() OVER (
+                           PARTITION BY title_hash
+                           ORDER BY CASE source
+                               WHEN 'user' THEN 1
+                               WHEN 'ai' THEN 2
+                               WHEN 'heuristic' THEN 3
+                               ELSE 4
+                           END
+                       ) as rn
+                FROM labels
+            )
+            SELECT s.window_title, s.title_hash, s.end_time - s.start_time as duration_ms,
+                   s.idle_seconds * 1000 as idle_ms, bl.category
+            FROM segments s
+            LEFT JOIN best_labels bl ON bl.title_hash = s.title_hash AND bl.rn = 1
+            WHERE s.app_name = ?1 AND s.start_time >= ?2 AND s.start_time < ?3
+            ORDER BY s.start_time DESC
+            "#,
+        )?;
+
+        // Aggregate by extracted context, tracking category durations
+        struct ContextData {
+            total_duration_ms: i64,
+            idle_duration_ms: i64,
+            segment_count: u32,
+            sample_titles: Vec<String>,
+            category_durations: HashMap<String, i64>, // Track duration per category
+        }
+        let mut context_map: HashMap<String, ContextData> = HashMap::new();
+
+        let rows = stmt.query_map(params![app_name, start_ms, end_ms], |row| {
+            let title: Option<String> = row.get(0)?;
+            let duration_ms: i64 = row.get(2)?;
+            let idle_ms: i64 = row.get(3)?;
+            let category: Option<String> = row.get(4)?;
+            Ok((title, duration_ms, idle_ms, category))
+        })?;
+
+        for row in rows {
+            let (title, duration_ms, idle_ms, category) = row?;
+            let title_str = title.as_deref().unwrap_or("");
+
+            // Extract context from title
+            let context = utils::extract_context(app_name, title_str)
+                .unwrap_or_else(|| "other".to_string());
+
+            let entry = context_map.entry(context).or_insert_with(|| ContextData {
+                total_duration_ms: 0,
+                idle_duration_ms: 0,
+                segment_count: 0,
+                sample_titles: Vec::new(),
+                category_durations: HashMap::new(),
+            });
+
+            entry.total_duration_ms += duration_ms;
+            entry.idle_duration_ms += idle_ms;
+            entry.segment_count += 1;
+
+            // Track duration per category for this context
+            if let Some(ref cat) = category {
+                *entry.category_durations.entry(cat.clone()).or_default() += duration_ms;
+            }
+
+            // Collect sample titles (up to 3 unique)
+            if let Some(ref t) = title {
+                if entry.sample_titles.len() < 3 && !entry.sample_titles.contains(t) {
+                    entry.sample_titles.push(t.clone());
+                }
+            }
+        }
+
+        // Convert to vec, picking dominant category by duration
+        let mut contexts: Vec<ContextSummary> = context_map
+            .into_iter()
+            .map(|(ctx, data)| {
+                // Pick category with max duration
+                let category = data
+                    .category_durations
+                    .into_iter()
+                    .max_by_key(|(_, dur)| *dur)
+                    .map(|(cat, _)| cat);
+
+                ContextSummary {
+                    context: ctx,
+                    category,
+                    total_duration_ms: data.total_duration_ms,
+                    idle_duration_ms: data.idle_duration_ms,
+                    segment_count: data.segment_count,
+                    sample_titles: data.sample_titles,
+                }
+            })
+            .collect();
+        contexts.sort_by(|a, b| b.total_duration_ms.cmp(&a.total_duration_ms));
+
+        Ok(contexts)
     }
 
     fn get_today_active_ms(&self) -> StorageResult<i64> {
@@ -527,6 +753,376 @@ impl StorageAdapter for SqliteStorage {
         Ok(())
     }
 
+    // === Classification Rules ===
+
+    fn get_rules(&self) -> StorageResult<Vec<ClassificationRule>> {
+        let conn = self.conn.lock().map_err(|e| e.to_string())?;
+
+        let mut stmt = conn.prepare(
+            r#"
+            SELECT rule_id, app_pattern, title_pattern, match_type, category,
+                   tags, source, priority, enabled, created_at
+            FROM classification_rules
+            WHERE enabled = 1
+            ORDER BY
+                -- Primary: effective priority (source score + priority)
+                CASE source
+                    WHEN 'user' THEN 100
+                    WHEN 'ai-approved' THEN 50
+                    WHEN 'builtin' THEN 0
+                    ELSE 0
+                END + priority DESC,
+                -- Tie-breaker 1: specificity (longer patterns are more specific)
+                LENGTH(COALESCE(app_pattern, '')) + LENGTH(COALESCE(title_pattern, '')) DESC,
+                -- Tie-breaker 2: newer rules win
+                created_at DESC
+            "#,
+        )?;
+
+        let rules = stmt
+            .query_map([], |row| {
+                let tags_json: Option<String> = row.get(5)?;
+                let tags: Option<Vec<String>> = tags_json
+                    .as_ref()
+                    .and_then(|s| serde_json::from_str(s).ok());
+
+                let match_type_str: String = row.get(3)?;
+                let source_str: String = row.get(6)?;
+
+                Ok(ClassificationRule {
+                    rule_id: row.get(0)?,
+                    app_pattern: row.get(1)?,
+                    title_pattern: row.get(2)?,
+                    match_type: MatchType::from_str(&match_type_str),
+                    category: row.get(4)?,
+                    tags,
+                    source: RuleSource::from_str(&source_str),
+                    priority: row.get(7)?,
+                    enabled: row.get::<_, i32>(8)? != 0,
+                    created_at: row.get(9)?,
+                })
+            })?
+            .collect::<Result<Vec<_>, _>>()?;
+
+        Ok(rules)
+    }
+
+    fn get_all_rules(&self) -> StorageResult<Vec<ClassificationRule>> {
+        let conn = self.conn.lock().map_err(|e| e.to_string())?;
+
+        // Return ALL rules (including disabled) for UI management
+        let mut stmt = conn.prepare(
+            r#"
+            SELECT rule_id, app_pattern, title_pattern, match_type, category,
+                   tags, source, priority, enabled, created_at
+            FROM classification_rules
+            ORDER BY
+                -- Primary: effective priority (source score + priority)
+                CASE source
+                    WHEN 'user' THEN 100
+                    WHEN 'ai-approved' THEN 50
+                    WHEN 'builtin' THEN 0
+                    ELSE 0
+                END + priority DESC,
+                -- Tie-breaker 1: specificity (longer patterns are more specific)
+                LENGTH(COALESCE(app_pattern, '')) + LENGTH(COALESCE(title_pattern, '')) DESC,
+                -- Tie-breaker 2: newer rules win
+                created_at DESC
+            "#,
+        )?;
+
+        let rules = stmt
+            .query_map([], |row| {
+                let tags_json: Option<String> = row.get(5)?;
+                let tags: Option<Vec<String>> = tags_json
+                    .as_ref()
+                    .and_then(|s| serde_json::from_str(s).ok());
+
+                let match_type_str: String = row.get(3)?;
+                let source_str: String = row.get(6)?;
+
+                Ok(ClassificationRule {
+                    rule_id: row.get(0)?,
+                    app_pattern: row.get(1)?,
+                    title_pattern: row.get(2)?,
+                    match_type: MatchType::from_str(&match_type_str),
+                    category: row.get(4)?,
+                    tags,
+                    source: RuleSource::from_str(&source_str),
+                    priority: row.get(7)?,
+                    enabled: row.get::<_, i32>(8)? != 0,
+                    created_at: row.get(9)?,
+                })
+            })?
+            .collect::<Result<Vec<_>, _>>()?;
+
+        Ok(rules)
+    }
+
+    fn get_rule(&self, rule_id: &str) -> StorageResult<Option<ClassificationRule>> {
+        let conn = self.conn.lock().map_err(|e| e.to_string())?;
+
+        let rule = conn
+            .query_row(
+                r#"
+                SELECT rule_id, app_pattern, title_pattern, match_type, category,
+                       tags, source, priority, enabled, created_at
+                FROM classification_rules
+                WHERE rule_id = ?1
+                "#,
+                params![rule_id],
+                |row| {
+                    let tags_json: Option<String> = row.get(5)?;
+                    let tags: Option<Vec<String>> = tags_json
+                        .as_ref()
+                        .and_then(|s| serde_json::from_str(s).ok());
+
+                    let match_type_str: String = row.get(3)?;
+                    let source_str: String = row.get(6)?;
+
+                    Ok(ClassificationRule {
+                        rule_id: row.get(0)?,
+                        app_pattern: row.get(1)?,
+                        title_pattern: row.get(2)?,
+                        match_type: MatchType::from_str(&match_type_str),
+                        category: row.get(4)?,
+                        tags,
+                        source: RuleSource::from_str(&source_str),
+                        priority: row.get(7)?,
+                        enabled: row.get::<_, i32>(8)? != 0,
+                        created_at: row.get(9)?,
+                    })
+                },
+            )
+            .optional()?;
+
+        Ok(rule)
+    }
+
+    fn upsert_rule(&self, rule: &ClassificationRule) -> StorageResult<()> {
+        let conn = self.conn.lock().map_err(|e| e.to_string())?;
+
+        let tags_json = rule.tags.as_ref().map(|t| serde_json::to_string(t).ok()).flatten();
+
+        conn.execute(
+            r#"
+            INSERT INTO classification_rules (
+                rule_id, app_pattern, title_pattern, match_type, category,
+                tags, source, priority, enabled, created_at
+            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)
+            ON CONFLICT(rule_id) DO UPDATE SET
+                app_pattern = excluded.app_pattern,
+                title_pattern = excluded.title_pattern,
+                match_type = excluded.match_type,
+                category = excluded.category,
+                tags = excluded.tags,
+                source = excluded.source,
+                priority = excluded.priority,
+                enabled = excluded.enabled
+            "#,
+            params![
+                rule.rule_id,
+                rule.app_pattern,
+                rule.title_pattern,
+                rule.match_type.as_str(),
+                rule.category,
+                tags_json,
+                rule.source.as_str(),
+                rule.priority,
+                rule.enabled as i32,
+                rule.created_at,
+            ],
+        )?;
+
+        Ok(())
+    }
+
+    fn delete_rule(&self, rule_id: &str) -> StorageResult<()> {
+        let conn = self.conn.lock().map_err(|e| e.to_string())?;
+
+        conn.execute(
+            "DELETE FROM classification_rules WHERE rule_id = ?1",
+            params![rule_id],
+        )?;
+
+        Ok(())
+    }
+
+    fn find_matching_rule(
+        &self,
+        app_name: &str,
+        window_title: &str,
+    ) -> StorageResult<Option<ClassificationRule>> {
+        // Get all enabled rules sorted by priority
+        let rules = self.get_rules()?;
+
+        // Find first matching rule (already sorted by priority)
+        for rule in rules {
+            if rule.matches(app_name, window_title) {
+                return Ok(Some(rule));
+            }
+        }
+
+        Ok(None)
+    }
+
+    // === AI Suggestions ===
+
+    fn get_pending_suggestions(&self) -> StorageResult<Vec<AiSuggestion>> {
+        let conn = self.conn.lock().map_err(|e| e.to_string())?;
+
+        let mut stmt = conn.prepare(
+            r#"
+            SELECT suggestion_id, app_pattern, title_pattern, match_type,
+                   suggested_category, confidence, reason, sample_titles,
+                   match_count, total_duration_ms, status, created_at, reviewed_at
+            FROM ai_suggestions
+            WHERE status = 'pending'
+            ORDER BY confidence DESC, total_duration_ms DESC
+            "#,
+        )?;
+
+        let suggestions = stmt
+            .query_map([], |row| {
+                let sample_titles_json: Option<String> = row.get(7)?;
+                let sample_titles: Vec<String> = sample_titles_json
+                    .as_ref()
+                    .and_then(|s| serde_json::from_str(s).ok())
+                    .unwrap_or_default();
+
+                let match_type_str: String = row.get(3)?;
+                let status_str: String = row.get(10)?;
+
+                Ok(AiSuggestion {
+                    suggestion_id: row.get(0)?,
+                    app_pattern: row.get(1)?,
+                    title_pattern: row.get(2)?,
+                    match_type: MatchType::from_str(&match_type_str),
+                    suggested_category: row.get(4)?,
+                    confidence: row.get(5)?,
+                    reason: row.get(6)?,
+                    sample_titles,
+                    match_count: row.get(8)?,
+                    total_duration_ms: row.get(9)?,
+                    status: SuggestionStatus::from_str(&status_str),
+                    created_at: row.get(11)?,
+                    reviewed_at: row.get(12)?,
+                })
+            })?
+            .collect::<Result<Vec<_>, _>>()?;
+
+        Ok(suggestions)
+    }
+
+    fn get_suggestion(&self, suggestion_id: &str) -> StorageResult<Option<AiSuggestion>> {
+        let conn = self.conn.lock().map_err(|e| e.to_string())?;
+
+        let suggestion = conn
+            .query_row(
+                r#"
+                SELECT suggestion_id, app_pattern, title_pattern, match_type,
+                       suggested_category, confidence, reason, sample_titles,
+                       match_count, total_duration_ms, status, created_at, reviewed_at
+                FROM ai_suggestions
+                WHERE suggestion_id = ?1
+                "#,
+                params![suggestion_id],
+                |row| {
+                    let sample_titles_json: Option<String> = row.get(7)?;
+                    let sample_titles: Vec<String> = sample_titles_json
+                        .as_ref()
+                        .and_then(|s| serde_json::from_str(s).ok())
+                        .unwrap_or_default();
+
+                    let match_type_str: String = row.get(3)?;
+                    let status_str: String = row.get(10)?;
+
+                    Ok(AiSuggestion {
+                        suggestion_id: row.get(0)?,
+                        app_pattern: row.get(1)?,
+                        title_pattern: row.get(2)?,
+                        match_type: MatchType::from_str(&match_type_str),
+                        suggested_category: row.get(4)?,
+                        confidence: row.get(5)?,
+                        reason: row.get(6)?,
+                        sample_titles,
+                        match_count: row.get(8)?,
+                        total_duration_ms: row.get(9)?,
+                        status: SuggestionStatus::from_str(&status_str),
+                        created_at: row.get(11)?,
+                        reviewed_at: row.get(12)?,
+                    })
+                },
+            )
+            .optional()?;
+
+        Ok(suggestion)
+    }
+
+    fn insert_suggestion(&self, suggestion: &AiSuggestion) -> StorageResult<()> {
+        let conn = self.conn.lock().map_err(|e| e.to_string())?;
+
+        let sample_titles_json = serde_json::to_string(&suggestion.sample_titles).ok();
+
+        conn.execute(
+            r#"
+            INSERT INTO ai_suggestions (
+                suggestion_id, app_pattern, title_pattern, match_type,
+                suggested_category, confidence, reason, sample_titles,
+                match_count, total_duration_ms, status, created_at, reviewed_at
+            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)
+            "#,
+            params![
+                suggestion.suggestion_id,
+                suggestion.app_pattern,
+                suggestion.title_pattern,
+                suggestion.match_type.as_str(),
+                suggestion.suggested_category,
+                suggestion.confidence,
+                suggestion.reason,
+                sample_titles_json,
+                suggestion.match_count,
+                suggestion.total_duration_ms,
+                suggestion.status.as_str(),
+                suggestion.created_at,
+                suggestion.reviewed_at,
+            ],
+        )?;
+
+        Ok(())
+    }
+
+    fn update_suggestion_status(
+        &self,
+        suggestion_id: &str,
+        status: SuggestionStatus,
+    ) -> StorageResult<()> {
+        let conn = self.conn.lock().map_err(|e| e.to_string())?;
+
+        let now = chrono::Utc::now().timestamp_millis();
+
+        conn.execute(
+            "UPDATE ai_suggestions SET status = ?1, reviewed_at = ?2 WHERE suggestion_id = ?3",
+            params![status.as_str(), now, suggestion_id],
+        )?;
+
+        Ok(())
+    }
+
+    fn cleanup_old_suggestions(&self, max_age_days: u32) -> StorageResult<u32> {
+        let conn = self.conn.lock().map_err(|e| e.to_string())?;
+
+        let cutoff_ms = chrono::Utc::now().timestamp_millis()
+            - (max_age_days as i64 * 24 * 60 * 60 * 1000);
+
+        let deleted = conn.execute(
+            "DELETE FROM ai_suggestions WHERE created_at < ?1 AND status IN ('rejected', 'expired')",
+            params![cutoff_ms],
+        )?;
+
+        Ok(deleted as u32)
+    }
+
     fn run_migrations(&self) -> StorageResult<()> {
         let conn = self.conn.lock().map_err(|e| e.to_string())?;
 
@@ -556,6 +1152,26 @@ impl StorageAdapter for SqliteStorage {
             conn.execute(
                 "INSERT INTO schema_migrations (version, applied_at) VALUES (?1, ?2)",
                 params![1, now],
+            )?;
+        }
+
+        if current_version < 2 {
+            Self::run_migration_v002(&conn)?;
+
+            let now = chrono::Utc::now().timestamp_millis();
+            conn.execute(
+                "INSERT INTO schema_migrations (version, applied_at) VALUES (?1, ?2)",
+                params![2, now],
+            )?;
+        }
+
+        if current_version < 3 {
+            Self::run_migration_v003(&conn)?;
+
+            let now = chrono::Utc::now().timestamp_millis();
+            conn.execute(
+                "INSERT INTO schema_migrations (version, applied_at) VALUES (?1, ?2)",
+                params![3, now],
             )?;
         }
 

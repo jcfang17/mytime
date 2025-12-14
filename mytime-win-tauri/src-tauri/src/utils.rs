@@ -203,6 +203,163 @@ pub fn format_day_label(offset: i32) -> String {
     }
 }
 
+// === Context Extraction for Browsers ===
+
+/// Known browser app names (lowercase, without .exe)
+const BROWSER_APPS: &[&str] = &[
+    "msedge", "chrome", "firefox", "brave", "opera", "vivaldi", "arc",
+    "safari", "chromium", "edge", "iexplore", "waterfox", "librewolf",
+];
+
+/// Check if an app is a browser
+pub fn is_browser(app_name: &str) -> bool {
+    let app_lower = app_name.to_lowercase();
+    let name = app_lower.trim_end_matches(".exe");
+    BROWSER_APPS.iter().any(|b| name.contains(b))
+}
+
+/// Extract context (site/domain) from a browser window title
+///
+/// Browser titles typically follow patterns like:
+/// - "Page Title - Site Name"
+/// - "Page Title | Site Name"
+/// - "Page Title – Site Name" (en-dash)
+/// - "Site Name: Page Title" (less common)
+///
+/// Returns the extracted site name, or None if no clear pattern found
+pub fn extract_browser_context(window_title: &str) -> Option<String> {
+    let title = window_title.trim();
+    if title.is_empty() {
+        return None;
+    }
+
+    // Try to extract from common patterns
+    // Pattern 1: "... - Site Name" or "... | Site Name" or "... – Site Name"
+    let separators = [" - ", " | ", " – ", " — ", " · "];
+
+    for sep in separators {
+        if let Some(pos) = title.rfind(sep) {
+            let site = title[pos + sep.len()..].trim();
+            if is_valid_context(site) {
+                return Some(normalize_context(site));
+            }
+        }
+    }
+
+    // Pattern 2: "Site Name: ..." (check first segment)
+    if let Some(pos) = title.find(": ") {
+        let site = title[..pos].trim();
+        // Only use if it looks like a site name (short, no spaces or few)
+        if site.len() < 30 && site.split_whitespace().count() <= 3 {
+            if is_valid_context(site) {
+                return Some(normalize_context(site));
+            }
+        }
+    }
+
+    // No pattern found - try to extract domain-like strings
+    extract_domain_from_title(title)
+}
+
+/// Check if a string looks like a valid site/context name
+fn is_valid_context(s: &str) -> bool {
+    // Must have some content
+    if s.is_empty() || s.len() < 2 {
+        return false;
+    }
+    // Reject if too long (probably not a site name)
+    if s.len() > 50 {
+        return false;
+    }
+    // Reject common non-site strings
+    let lower = s.to_lowercase();
+    let reject_patterns = [
+        "untitled", "new tab", "loading", "personal", "and more",
+        "search results", "google search", "bing search",
+    ];
+    if reject_patterns.iter().any(|p| lower.contains(p)) {
+        return false;
+    }
+    true
+}
+
+/// Normalize a context string for consistent storage/comparison
+fn normalize_context(s: &str) -> String {
+    s.to_lowercase()
+        .trim()
+        // Remove common suffixes
+        .trim_end_matches(" - google chrome")
+        .trim_end_matches(" - microsoft edge")
+        .trim_end_matches(" - mozilla firefox")
+        .trim_end_matches(" - personal")
+        .trim_end_matches(" - work")
+        .trim()
+        .to_string()
+}
+
+/// Try to extract a domain-like pattern from title
+fn extract_domain_from_title(title: &str) -> Option<String> {
+    // Look for common domain patterns in the title
+    let known_sites = [
+        ("youtube", "youtube"),
+        ("youtu.be", "youtube"),
+        ("github.com", "github"),
+        ("github", "github"),
+        ("gitlab", "gitlab"),
+        ("stackoverflow", "stackoverflow"),
+        ("stack overflow", "stackoverflow"),
+        ("reddit", "reddit"),
+        ("twitter", "twitter"),
+        ("x.com", "twitter"),
+        ("bilibili", "bilibili"),
+        ("netflix", "netflix"),
+        ("twitch", "twitch"),
+        ("discord", "discord"),
+        ("slack", "slack"),
+        ("notion", "notion"),
+        ("figma", "figma"),
+        ("google docs", "google docs"),
+        ("google sheets", "google sheets"),
+        ("google drive", "google drive"),
+        ("gmail", "gmail"),
+        ("outlook", "outlook"),
+        ("overleaf", "overleaf"),
+        ("chatgpt", "chatgpt"),
+        ("claude", "claude"),
+        ("linkedin", "linkedin"),
+        ("facebook", "facebook"),
+        ("instagram", "instagram"),
+        ("tiktok", "tiktok"),
+        ("amazon", "amazon"),
+        ("wikipedia", "wikipedia"),
+        ("medium", "medium"),
+        ("dev.to", "dev.to"),
+        ("hacker news", "hacker news"),
+        ("localhost", "localhost"),
+    ];
+
+    let title_lower = title.to_lowercase();
+    for (pattern, site) in known_sites {
+        if title_lower.contains(pattern) {
+            return Some(site.to_string());
+        }
+    }
+
+    None
+}
+
+/// Extract context for any app (browser or not)
+/// For browsers, extracts site. For other apps, returns None.
+pub fn extract_context(app_name: &str, window_title: &str) -> Option<String> {
+    if is_browser(app_name) {
+        extract_browser_context(window_title)
+    } else {
+        // For non-browsers, we could potentially extract project names
+        // from IDEs, etc. For now, return None.
+        None
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -243,5 +400,43 @@ mod tests {
         assert_eq!(format_duration_ms(0), "00:00");
         assert_eq!(format_duration_ms(65000), "01:05");
         assert_eq!(format_duration_ms(3665000), "01:01:05");
+    }
+
+    #[test]
+    fn test_is_browser() {
+        assert!(is_browser("msedge.exe"));
+        assert!(is_browser("chrome.exe"));
+        assert!(is_browser("firefox.exe"));
+        assert!(!is_browser("code.exe"));
+        assert!(!is_browser("slack.exe"));
+    }
+
+    #[test]
+    fn test_extract_browser_context() {
+        // Standard "Title - Site" pattern
+        assert_eq!(
+            extract_browser_context("My Project - Overleaf"),
+            Some("overleaf".to_string())
+        );
+        assert_eq!(
+            extract_browser_context("Watch Video - YouTube"),
+            Some("youtube".to_string())
+        );
+
+        // Pipe separator
+        assert_eq!(
+            extract_browser_context("repo | GitHub"),
+            Some("github".to_string())
+        );
+
+        // Known site detection
+        assert_eq!(
+            extract_browser_context("Some random video on bilibili"),
+            Some("bilibili".to_string())
+        );
+
+        // Empty/invalid
+        assert_eq!(extract_browser_context(""), None);
+        assert_eq!(extract_browser_context("New Tab"), None);
     }
 }

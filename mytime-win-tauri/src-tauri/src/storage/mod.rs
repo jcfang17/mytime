@@ -6,7 +6,7 @@ mod sqlite;
 
 pub use sqlite::SqliteStorage;
 
-use crate::models::{AppSummary, DailySummary, Label, Segment};
+use crate::models::{AiSuggestion, AppSummary, ClassificationRule, ContextSummary, DailySummary, Label, Segment};
 use std::error::Error;
 
 /// Result type for storage operations
@@ -44,6 +44,22 @@ pub trait StorageAdapter: Send + Sync {
     /// Get app breakdown for a time range
     fn get_app_breakdown(&self, start_ms: i64, end_ms: i64) -> StorageResult<Vec<AppSummary>>;
 
+    /// Get category breakdown at segment level (not app level)
+    /// This properly handles apps like browsers where different titles have different categories
+    fn get_segment_category_breakdown(
+        &self,
+        start_ms: i64,
+        end_ms: i64,
+    ) -> StorageResult<Vec<(String, i64)>>;
+
+    /// Get context breakdown within an app (e.g., sites within a browser)
+    fn get_app_contexts(
+        &self,
+        app_name: &str,
+        start_ms: i64,
+        end_ms: i64,
+    ) -> StorageResult<Vec<ContextSummary>>;
+
     /// Get today's total active time in milliseconds
     fn get_today_active_ms(&self) -> StorageResult<i64>;
 
@@ -54,6 +70,54 @@ pub trait StorageAdapter: Send + Sync {
 
     /// Set a config value
     fn set_config(&self, key: &str, value: &str) -> StorageResult<()>;
+
+    // === Classification Rules ===
+
+    /// Get all enabled rules, sorted by effective priority (highest first)
+    /// Used for rule matching during categorization
+    fn get_rules(&self) -> StorageResult<Vec<ClassificationRule>>;
+
+    /// Get all rules (including disabled), sorted by effective priority
+    /// Used for the UI to show/edit all rules
+    fn get_all_rules(&self) -> StorageResult<Vec<ClassificationRule>>;
+
+    /// Get a rule by ID
+    fn get_rule(&self, rule_id: &str) -> StorageResult<Option<ClassificationRule>>;
+
+    /// Insert or update a rule
+    fn upsert_rule(&self, rule: &ClassificationRule) -> StorageResult<()>;
+
+    /// Delete a rule by ID
+    fn delete_rule(&self, rule_id: &str) -> StorageResult<()>;
+
+    /// Find the first matching rule for an app/title pair
+    /// Returns the highest-priority matching rule
+    fn find_matching_rule(
+        &self,
+        app_name: &str,
+        window_title: &str,
+    ) -> StorageResult<Option<ClassificationRule>>;
+
+    // === AI Suggestions ===
+
+    /// Get all pending AI suggestions
+    fn get_pending_suggestions(&self) -> StorageResult<Vec<AiSuggestion>>;
+
+    /// Get a suggestion by ID
+    fn get_suggestion(&self, suggestion_id: &str) -> StorageResult<Option<AiSuggestion>>;
+
+    /// Insert a new AI suggestion
+    fn insert_suggestion(&self, suggestion: &AiSuggestion) -> StorageResult<()>;
+
+    /// Update suggestion status (approve/reject/expire)
+    fn update_suggestion_status(
+        &self,
+        suggestion_id: &str,
+        status: crate::models::SuggestionStatus,
+    ) -> StorageResult<()>;
+
+    /// Delete old/expired suggestions
+    fn cleanup_old_suggestions(&self, max_age_days: u32) -> StorageResult<u32>;
 
     // === Maintenance ===
 

@@ -466,17 +466,191 @@ cd src-tauri && cargo test
 
 ---
 
+## Classification Rules (v0.2)
+
+### Overview
+
+Classification rules allow flexible categorization of windows beyond the built-in heuristics:
+
+```
+Priority: user rules > ai-approved rules > builtin rules > heuristic fallback
+```
+
+### Database Schema
+
+```sql
+CREATE TABLE classification_rules (
+    rule_id TEXT PRIMARY KEY,
+    app_pattern TEXT,           -- NULL = match any app
+    title_pattern TEXT,         -- NULL = match any title
+    match_type TEXT NOT NULL,   -- 'contains', 'prefix', 'exact', 'regex'
+    category TEXT NOT NULL,
+    tags TEXT,                  -- JSON array: ["site:overleaf", "work"]
+    source TEXT NOT NULL,       -- 'builtin', 'user', 'ai-approved'
+    priority INTEGER DEFAULT 0, -- Additional priority within source
+    enabled INTEGER DEFAULT 1,
+    created_at INTEGER NOT NULL
+);
+```
+
+### Match Types
+
+| Type | Description | Example |
+|------|-------------|---------|
+| `contains` | Substring match (case-insensitive) | "bilibili" matches "Bilibili - Video" |
+| `prefix` | Starts with (case-insensitive) | "github" matches "GitHub - repo" |
+| `exact` | Exact match (case-insensitive) | "steam.exe" matches only "steam.exe" |
+| `regex` | Regular expression | `youtube\|youtu\.be` matches both domains |
+
+### Rule Sources
+
+| Source | Priority | Description |
+|--------|----------|-------------|
+| `user` | 100 | Created by user, highest priority |
+| `ai-approved` | 50 | AI suggestion approved by user |
+| `builtin` | 0 | Shipped with app |
+
+### Categorization Flow
+
+```rust
+pub fn categorize(storage, app_name, window_title) -> CategorizationResult {
+    // 1. Try rules (sorted by effective_priority DESC)
+    if let Some(rule) = storage.find_matching_rule(app_name, window_title) {
+        return rule_result;
+    }
+
+    // 2. Fall back to heuristics
+    categorize_heuristic(app_name, window_title)
+}
+```
+
+### API Commands
+
+```typescript
+// Get all enabled rules
+getRules(): Promise<ClassificationRule[]>
+
+// Create a new user rule
+createRule(appPattern, titlePattern, matchType, category, tags): Promise<ClassificationRule>
+
+// Update existing rule
+updateRule(ruleId, ...): Promise<void>
+
+// Delete a rule
+deleteRule(ruleId): Promise<void>
+
+// Preview what a rule would match (for testing)
+previewRuleMatches(appPattern, titlePattern, matchType, daysBack): Promise<RulePreview>
+```
+
+### Example Rules
+
+```javascript
+// Edge + Bilibili = Entertainment
+createRule("msedge.exe", "bilibili", "contains", "entertainment", ["site:bilibili"])
+
+// Edge + Overleaf = Productivity
+createRule("msedge.exe", "overleaf", "contains", "productivity", ["site:overleaf"])
+
+// All YouTube = Entertainment (any browser)
+createRule(null, "youtube", "contains", "entertainment", ["site:youtube"])
+```
+
+---
+
+## Context Extraction (v0.2)
+
+### Overview
+
+For browsers, MyTime extracts "context" (site/domain) from window titles to enable:
+- Granular categorization (Edge → YouTube = Entertainment, Edge → Overleaf = Productivity)
+- Drilldown views showing time per site within a browser
+- Reduced cardinality for rule matching
+
+### Browser Detection
+
+```rust
+const BROWSER_APPS: &[&str] = &[
+    "msedge", "chrome", "firefox", "brave", "opera", "vivaldi", "arc",
+    "safari", "chromium", "edge", "iexplore", "waterfox", "librewolf",
+];
+
+pub fn is_browser(app_name: &str) -> bool {
+    let app_lower = app_name.to_lowercase();
+    let name = app_lower.trim_end_matches(".exe");
+    BROWSER_APPS.iter().any(|b| name.contains(b))
+}
+```
+
+### Context Extraction Patterns
+
+Browser titles typically follow these patterns:
+
+| Pattern | Example | Extracted Context |
+|---------|---------|-------------------|
+| `Title - Site` | "Watch Video - YouTube" | "youtube" |
+| `Title \| Site` | "repo \| GitHub" | "github" |
+| `Title – Site` | "Document – Overleaf" | "overleaf" |
+| Known site keyword | "Some bilibili video" | "bilibili" |
+
+```rust
+pub fn extract_browser_context(window_title: &str) -> Option<String> {
+    // 1. Try separator patterns: " - ", " | ", " – ", " — ", " · "
+    // 2. Try "Site: Title" pattern
+    // 3. Fall back to known site detection (youtube, github, etc.)
+}
+```
+
+### Known Sites
+
+The extractor recognizes 30+ common sites including:
+- Video: youtube, bilibili, netflix, twitch
+- Development: github, gitlab, stackoverflow, localhost
+- Productivity: notion, figma, overleaf, google docs
+- Social: reddit, twitter, linkedin, facebook
+- AI: chatgpt, claude
+
+### API
+
+```typescript
+// Get context breakdown for an app
+getAppContexts(appName: string, dayOffset: number): Promise<ContextSummary[]>
+
+interface ContextSummary {
+  context: string;           // "youtube", "github", etc.
+  category: string | null;   // Category for this context
+  total_duration_ms: number;
+  idle_duration_ms: number;
+  segment_count: number;
+  sample_titles: string[];   // Up to 3 example titles
+}
+```
+
+### Usage Example
+
+```typescript
+// Get breakdown of sites visited in Edge today
+const contexts = await getAppContexts("msedge.exe", 0);
+// [
+//   { context: "github", total_duration_ms: 1800000, ... },
+//   { context: "youtube", total_duration_ms: 900000, ... },
+//   { context: "overleaf", total_duration_ms: 600000, ... },
+// ]
+```
+
+---
+
 ## Files Changed Summary
 
 | File | Purpose |
 |------|---------|
-| `lib.rs` | App state, Tauri commands, tray setup |
-| `models.rs` | Segment, Label, TrackingState structs |
+| `lib.rs` | App state, Tauri commands, tray setup, rule commands |
+| `models.rs` | Segment, Label, TrackingState, ClassificationRule structs |
 | `tracker.rs` | Window tracking, stable-title rule, hooks |
-| `categorizer.rs` | Heuristic classification |
-| `storage/sqlite.rs` | Database operations |
+| `categorizer.rs` | Rule-based + heuristic classification |
+| `storage/sqlite.rs` | Database operations, rule CRUD |
 | `utils.rs` | Hashing, time utilities |
 | `App.tsx` | React UI, state management |
 | `App.css` | Dark theme styling |
-| `api.ts` | Tauri invoke wrappers |
-| `types.ts` | TypeScript interfaces |
+| `api.ts` | Tauri invoke wrappers, rule API |
+| `types.ts` | TypeScript interfaces, rule types |

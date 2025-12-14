@@ -1,7 +1,7 @@
 // API functions for communicating with the Tauri backend
 
 import { invoke } from "@tauri-apps/api/core";
-import type { TrackingState, AppSummary } from "./types";
+import type { TrackingState, AppSummary, ClassificationRule, RulePreview, MatchType, ContextSummary, AiSuggestion } from "./types";
 
 export async function startTracking(): Promise<TrackingState> {
   return await invoke("start_tracking");
@@ -23,6 +23,13 @@ export async function getCategoryBreakdown(
   dayOffset: number
 ): Promise<[string, number][]> {
   return await invoke("get_category_breakdown", { dayOffset });
+}
+
+export async function getAppContexts(
+  appName: string,
+  dayOffset: number
+): Promise<ContextSummary[]> {
+  return await invoke("get_app_contexts", { appName, dayOffset });
 }
 
 export async function setAppCategory(
@@ -76,4 +83,110 @@ export function formatDurationLocal(ms: number): string {
   return `${minutes.toString().padStart(2, "0")}:${secs
     .toString()
     .padStart(2, "0")}`;
+}
+
+// === Classification Rules API ===
+
+export async function getRules(): Promise<ClassificationRule[]> {
+  return await invoke("get_rules");
+}
+
+export async function getRule(ruleId: string): Promise<ClassificationRule | null> {
+  return await invoke("get_rule", { ruleId });
+}
+
+export async function createRule(
+  appPattern: string | null,
+  titlePattern: string | null,
+  matchType: MatchType,
+  category: string,
+  tags: string[] | null
+): Promise<ClassificationRule> {
+  return await invoke("create_rule", {
+    appPattern,
+    titlePattern,
+    matchType,
+    category,
+    tags,
+  });
+}
+
+export async function updateRule(
+  ruleId: string,
+  appPattern: string | null,
+  titlePattern: string | null,
+  matchType: MatchType,
+  category: string,
+  tags: string[] | null,
+  enabled: boolean,
+  priority: number
+): Promise<void> {
+  return await invoke("update_rule", {
+    ruleId,
+    appPattern,
+    titlePattern,
+    matchType,
+    category,
+    tags,
+    enabled,
+    priority,
+  });
+}
+
+export async function deleteRule(ruleId: string): Promise<void> {
+  return await invoke("delete_rule", { ruleId });
+}
+
+export async function previewRuleMatches(
+  appPattern: string | null,
+  titlePattern: string | null,
+  matchType: MatchType,
+  daysBack: number
+): Promise<RulePreview> {
+  return await invoke("preview_rule_matches", {
+    appPattern,
+    titlePattern,
+    matchType,
+    daysBack,
+  });
+}
+
+// === AI Suggestions API ===
+
+export async function getSuggestions(): Promise<AiSuggestion[]> {
+  return await invoke("get_suggestions");
+}
+
+export async function approveSuggestion(
+  suggestionId: string
+): Promise<ClassificationRule> {
+  return await invoke("approve_suggestion", { suggestionId });
+}
+
+export async function rejectSuggestion(suggestionId: string): Promise<void> {
+  return await invoke("reject_suggestion", { suggestionId });
+}
+
+export async function createSuggestion(
+  appPattern: string | null,
+  titlePattern: string | null,
+  matchType: MatchType,
+  suggestedCategory: string,
+  confidence: number,
+  reason: string,
+  sampleTitles: string[],
+  matchCount: number,
+  totalDurationMs: number
+): Promise<AiSuggestion> {
+  return await invoke("create_suggestion", {
+    appPattern,
+    titlePattern,
+    matchType,
+    suggestedCategory,
+    confidence,
+    reason,
+    sampleTitles,
+    matchCount,
+    totalDurationMs,
+  });
 }

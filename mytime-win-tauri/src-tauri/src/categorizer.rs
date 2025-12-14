@@ -1,12 +1,57 @@
-//! Heuristic categorizer for MyTime
+//! Categorizer for MyTime
 //!
-//! Categorizes window titles into predefined categories based on pattern matching.
+//! Categorizes window titles using:
+//! 1. Classification rules (user/ai/builtin) - checked first
+//! 2. Heuristic patterns - fallback
+//!
 //! Categories: entertainment, development, productivity, communication, unknown
 
-use crate::models::{Category, Label, LabelSource};
+use crate::models::{Category, ClassificationRule, Label, LabelSource, MatchType, RuleSource};
+use crate::storage::{SqliteStorage, StorageAdapter};
 use crate::utils::now_ms;
 
-/// Categorize a window based on app name and title using heuristics
+/// Result of categorization - includes category and optional tags
+#[derive(Debug, Clone)]
+pub struct CategorizationResult {
+    pub category: Category,
+    pub tags: Option<Vec<String>>,
+    pub source: LabelSource,
+    pub rule_id: Option<String>,
+}
+
+/// Categorize a window using rules first, then heuristics as fallback
+/// This is the main entry point for categorization
+pub fn categorize(
+    storage: &SqliteStorage,
+    app_name: &str,
+    window_title: &str,
+) -> CategorizationResult {
+    // Try rules first
+    if let Ok(Some(rule)) = storage.find_matching_rule(app_name, window_title) {
+        return CategorizationResult {
+            category: Category::from_str(&rule.category),
+            tags: rule.tags,
+            source: match rule.source {
+                RuleSource::User => LabelSource::User,
+                RuleSource::AiApproved => LabelSource::Ai,
+                RuleSource::Builtin => LabelSource::Heuristic,
+            },
+            rule_id: Some(rule.rule_id),
+        };
+    }
+
+    // Fall back to heuristics
+    let category = categorize_heuristic(app_name, window_title);
+    CategorizationResult {
+        category,
+        tags: None,
+        source: LabelSource::Heuristic,
+        rule_id: None,
+    }
+}
+
+/// Categorize a window based on app name and title using heuristics only
+/// This is the fallback when no rules match
 pub fn categorize_heuristic(app_name: &str, window_title: &str) -> Category {
     let title_lower = window_title.to_lowercase();
     let app_lower = app_name.to_lowercase();
@@ -34,7 +79,24 @@ pub fn categorize_heuristic(app_name: &str, window_title: &str) -> Category {
     Category::Unknown
 }
 
-/// Create a heuristic label for a title_hash
+/// Create a label for a title_hash using rules first, then heuristics
+pub fn create_label(
+    storage: &SqliteStorage,
+    title_hash: &str,
+    app_name: &str,
+    window_title: &str,
+) -> Label {
+    let result = categorize(storage, app_name, window_title);
+    Label {
+        title_hash: title_hash.to_string(),
+        category: result.category.as_str().to_string(),
+        source: result.source,
+        confidence: None,
+        updated_at: now_ms(),
+    }
+}
+
+/// Create a heuristic-only label for a title_hash (legacy function)
 pub fn create_heuristic_label(title_hash: &str, app_name: &str, window_title: &str) -> Label {
     let category = categorize_heuristic(app_name, window_title);
     Label {
@@ -43,6 +105,28 @@ pub fn create_heuristic_label(title_hash: &str, app_name: &str, window_title: &s
         source: LabelSource::Heuristic,
         confidence: None, // Heuristics don't have confidence scores
         updated_at: now_ms(),
+    }
+}
+
+/// Create a new user rule from app/title pattern
+/// This is called when user wants to "always classify X as Y"
+pub fn create_user_rule(
+    app_pattern: Option<String>,
+    title_pattern: Option<String>,
+    category: &str,
+    tags: Option<Vec<String>>,
+) -> ClassificationRule {
+    ClassificationRule {
+        rule_id: uuid::Uuid::new_v4().to_string(),
+        app_pattern,
+        title_pattern,
+        match_type: MatchType::Contains, // Default to contains
+        category: category.to_string(),
+        tags,
+        source: RuleSource::User,
+        priority: 0,
+        enabled: true,
+        created_at: now_ms(),
     }
 }
 
