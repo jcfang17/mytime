@@ -1,0 +1,60 @@
+[package]
+name = "mytime-win-tauri"
+version = "0.1.0"
+description = "MyTime - Personal Time Tracking"
+authors = ["you"]
+edition = "2021"
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[lib]
+# The `_lib` suffix may seem redundant but it is necessary
+# to make the lib name unique and wouldn't conflict with the bin name.
+# This seems to be only an issue on Windows, see https://github.com/rust-lang/cargo/issues/8519
+name = "mytime_win_tauri_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+tauri = { version = "2", features = ["tray-icon"] }
+tauri-plugin-opener = "2"
+tauri-plugin-dialog = "2"
+tauri-plugin-autostart = "2"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+# Time handling
+chrono = { version = "0.4", features = ["serde"] }
+
+# SQLite storage
+rusqlite = { version = "0.31", features = ["bundled"] }
+
+# Hashing for title_hash
+blake3 = "1.5"
+
+# UUID generation for segment_id, device_id
+uuid = { version = "1.0", features = ["v4"] }
+
+# Regex for title normalization
+regex = "1.10"
+
+# CSV handling for import/export
+csv = "1.3"
+
+# Image decoding for tray icon
+image = { version = "0.25", default-features = false, features = ["png"] }
+
+# Windows API for window tracking
+[target.'cfg(windows)'.dependencies]
+windows = { version = "0.58", features = [
+    "Win32_Foundation",
+    "Win32_UI_WindowsAndMessaging",
+    "Win32_System_Threading",
+    "Win32_UI_Input_KeyboardAndMouse",
+    "Win32_System_ProcessStatus",
+    "Win32_System_SystemInformation",
+    "Win32_Security",
+] }
+
