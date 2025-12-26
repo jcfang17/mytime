@@ -7,45 +7,17 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 MyTime is a cross-platform time tracking application with separate native implementations for each platform:
 
 - **mytime-macos/** - macOS version using Swift/SwiftUI
-- **mytime-windows/** - Windows version using Rust/egui (legacy)
-- **mytime-win-tauri/** - Windows version using Tauri + React (current)
+- **mytime-win-tauri/** - Windows version using Tauri + React
 - **Future:** iOS and Android versions will follow the same pattern
 
 Each platform has its own directory with independent codebases tailored to platform-specific capabilities.
 
 **Important Files:**
 - **plan.md** - Enhancement plans and feature requirements for schema improvements
-- **mytime-windows/implementation-detail.md** - Critical Windows implementation patterns
 
 ## Platform-Specific Development
 
-### Windows Version (mytime-windows)
-
-**Technology Stack:**
-- Language: Rust (edition 2021)
-- GUI Framework: egui/eframe 0.29
-- System Integration: windows-rs, tray-icon
-- Data Storage: CSV files (mytime_data.csv)
-
-**Build & Run Commands:**
-```bash
-cd mytime-windows
-cargo build --release     # Build release version
-cargo run --release       # Run release version
-cargo test               # Run tests
-cargo clippy             # Run linter
-cargo fmt                # Format code
-```
-
-**Critical Implementation Detail:**
-When implementing features that involve cross-thread communication (e.g., system tray commands), you MUST use `ctx.request_repaint()` to force egui to process events immediately. See `implementation-detail.md` for the specific pattern.
-
-**Key Files:**
-- `src/main.rs` - Main application entry, egui setup, window management
-- `src/tray.rs` - System tray integration
-- `Cargo.toml` - Dependencies and build configuration
-
-### Windows Tauri Version (mytime-win-tauri)
+### Windows Version (mytime-win-tauri)
 
 **Technology Stack:**
 - Backend: Rust with Tauri 2.x
@@ -106,34 +78,17 @@ open MyTime.xcodeproj  # Then press ⌘+R to run
 
 ## Architecture Overview
 
-### Core Functionality (Both Platforms)
+### Core Functionality
 1. **Time Tracking:** Records time spent on active application windows
 2. **Window Detection:** Monitors currently focused application
-3. **Data Persistence:** Stores tracking data in CSV format
+3. **Data Persistence:** SQLite (Windows), CSV (macOS)
 4. **System Tray/Menu Bar:** Provides quick access controls
-5. **Floating Timer:** Shows current session time (visual differences per platform)
-
-### Data Format
-Both platforms use compatible CSV format. Windows has been updated to the new schema:
-
-**New Schema (Windows - implemented):**
-```csv
-app_name,window_title,start_time,end_time,duration_seconds,idle_seconds,keystrokes,mouse_clicks
-mytime-win.exe,MyTime,2025-07-21T00:54:39.399976-05:00,2025-07-21T00:54:42.400041800-05:00,3,0,0,1
-```
-
-**Old Schema (macOS - needs update):**
-```csv
-app_name,window_title,start_time,duration_seconds
-"Safari","GitHub - anthropics/claude","2025-07-12T22:57:09.966196Z",120
-```
-
-See `plan.md` for schema enhancement details.
+5. **Classification Rules:** Pattern-based categorization of activities
 
 ### Platform Differences
-- **Windows:** Single window with system tray, uses Win32 API for window detection
-- **macOS:** Menu bar app with floating timer, uses Accessibility API for window detection
-- **Windows:** Built as single .exe file
+- **Windows (Tauri):** Single window with system tray, uses Win32 API for window detection, SQLite storage
+- **macOS:** Menu bar app with floating timer, uses Accessibility API for window detection, CSV storage
+- **Windows:** Built as single .exe file via Tauri
 - **macOS:** Built as .app bundle requiring code signing
 
 ## Development Guidelines
@@ -152,7 +107,7 @@ See `plan.md` for schema enhancement details.
 4. Update platform-specific README if needed
 
 ### Debugging Time Tracking
-- **Windows:** Check `mytime_data.csv` in the working directory
+- **Windows:** Check SQLite database in `%APPDATA%/com.mytime.app/` or use export CSV
 - **macOS:** Check CSV export functionality via menu
 - Both platforms log window changes to their respective consoles
 

@@ -65,6 +65,14 @@ export interface RulePreview {
   sample_titles: string[];
 }
 
+// === Category Breakdown ===
+
+export interface CategoryBreakdownEntry {
+  category: string;
+  total_ms: number;
+  idle_ms: number;
+}
+
 // === Context (for browser site/domain breakdown) ===
 
 export interface ContextSummary {

@@ -46,11 +46,16 @@ pub trait StorageAdapter: Send + Sync {
 
     /// Get category breakdown at segment level (not app level)
     /// This properly handles apps like browsers where different titles have different categories
+    /// Returns (category, total_ms, idle_ms) for each category
     fn get_segment_category_breakdown(
         &self,
         start_ms: i64,
         end_ms: i64,
-    ) -> StorageResult<Vec<(String, i64)>>;
+    ) -> StorageResult<Vec<(String, i64, i64)>>;
+
+    /// Backfill labels for all segments matching a rule
+    /// Used when a rule is created/edited to update historical data
+    fn backfill_labels_for_rule(&self, rule: &ClassificationRule, days_back: u32) -> StorageResult<u32>;
 
     /// Get context breakdown within an app (e.g., sites within a browser)
     fn get_app_contexts(

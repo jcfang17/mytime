@@ -364,6 +364,7 @@ impl StorageAdapter for SqliteStorage {
                 WHERE title_hash = ?1
                 ORDER BY
                     CASE source
+                        WHEN 'manual' THEN 0
                         WHEN 'user' THEN 1
                         WHEN 'ai' THEN 2
                         WHEN 'heuristic' THEN 3
@@ -526,6 +527,7 @@ impl StorageAdapter for SqliteStorage {
                        ROW_NUMBER() OVER (
                            PARTITION BY title_hash
                            ORDER BY CASE source
+                               WHEN 'manual' THEN 0
                                WHEN 'user' THEN 1
                                WHEN 'ai' THEN 2
                                WHEN 'heuristic' THEN 3
@@ -562,11 +564,12 @@ impl StorageAdapter for SqliteStorage {
         &self,
         start_ms: i64,
         end_ms: i64,
-    ) -> StorageResult<Vec<(String, i64)>> {
+    ) -> StorageResult<Vec<(String, i64, i64)>> {
         let conn = self.conn.lock().map_err(|e| e.to_string())?;
 
         // Aggregate duration by segment-level category (using best label per title_hash)
         // This properly handles browsers where YouTube=entertainment and Overleaf=productivity
+        // Returns (category, total_ms, idle_ms)
         let mut stmt = conn.prepare(
             r#"
             WITH best_labels AS (
@@ -574,6 +577,7 @@ impl StorageAdapter for SqliteStorage {
                        ROW_NUMBER() OVER (
                            PARTITION BY title_hash
                            ORDER BY CASE source
+                               WHEN 'manual' THEN 0
                                WHEN 'user' THEN 1
                                WHEN 'ai' THEN 2
                                WHEN 'heuristic' THEN 3
@@ -583,18 +587,23 @@ impl StorageAdapter for SqliteStorage {
                 FROM labels
             )
             SELECT COALESCE(bl.category, 'unknown') as cat,
-                   SUM(s.end_time - s.start_time) as duration_ms
+                   SUM(s.end_time - s.start_time) as total_ms,
+                   SUM(s.idle_seconds * 1000) as idle_ms
             FROM segments s
             LEFT JOIN best_labels bl ON bl.title_hash = s.title_hash AND bl.rn = 1
             WHERE s.start_time >= ?1 AND s.start_time < ?2
             GROUP BY cat
-            ORDER BY duration_ms DESC
+            ORDER BY total_ms DESC
             "#,
         )?;
 
         let categories = stmt
             .query_map(params![start_ms, end_ms], |row| {
-                Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?))
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, i64>(1)?,
+                    row.get::<_, i64>(2).unwrap_or(0),
+                ))
             })?
             .collect::<Result<Vec<_>, _>>()?;
 
@@ -618,6 +627,7 @@ impl StorageAdapter for SqliteStorage {
                        ROW_NUMBER() OVER (
                            PARTITION BY title_hash
                            ORDER BY CASE source
+                               WHEN 'manual' THEN 0
                                WHEN 'user' THEN 1
                                WHEN 'ai' THEN 2
                                WHEN 'heuristic' THEN 3
@@ -964,6 +974,62 @@ impl StorageAdapter for SqliteStorage {
         }
 
         Ok(None)
+    }
+
+    fn backfill_labels_for_rule(&self, rule: &ClassificationRule, days_back: u32) -> StorageResult<u32> {
+        use crate::utils::{day_range_ms_with_offset, now_ms, DEFAULT_DAY_START_HOUR};
+        use std::collections::HashSet;
+
+        // Get the day start hour from config (or use default)
+        let day_start_hour = self.get_day_start_hour().unwrap_or(DEFAULT_DAY_START_HOUR);
+
+        // Calculate time range (last N days)
+        let (start_ms, _) = day_range_ms_with_offset(day_start_hour, -(days_back as i32));
+        let end_ms = now_ms();
+
+        // Get all segments in range
+        let segments = self.get_segments_range(start_ms, end_ms)?;
+
+        let mut updated_count = 0u32;
+        let mut processed_hashes = HashSet::new();
+
+        for segment in segments {
+            // Skip already processed title_hashes
+            if processed_hashes.contains(&segment.title_hash) {
+                continue;
+            }
+
+            // Check if this segment matches the rule
+            let window_title = segment.window_title.as_deref().unwrap_or("");
+            if !rule.matches(&segment.app_name, window_title) {
+                continue;
+            }
+
+            // Check if there's already a manual label (don't overwrite)
+            if let Ok(Some(existing)) = self.get_label(&segment.title_hash) {
+                if existing.source == LabelSource::Manual {
+                    processed_hashes.insert(segment.title_hash.clone());
+                    continue;
+                }
+            }
+
+            // Create/update label with source='user' (from rule)
+            let label = Label {
+                title_hash: segment.title_hash.clone(),
+                category: rule.category.clone(),
+                source: LabelSource::User,
+                confidence: None,
+                updated_at: now_ms(),
+            };
+
+            if self.upsert_label(&label).is_ok() {
+                updated_count += 1;
+            }
+
+            processed_hashes.insert(segment.title_hash);
+        }
+
+        Ok(updated_count)
     }
 
     // === AI Suggestions ===

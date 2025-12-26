@@ -24,11 +24,15 @@ import {
   rejectSuggestion,
   getAppContexts,
 } from "./api";
-import type { TrackingState, AppSummary, Category, ClassificationRule, MatchType, RulePreview, AiSuggestion, ContextSummary } from "./types";
+import type { TrackingState, AppSummary, Category, ClassificationRule, MatchType, RulePreview, AiSuggestion, ContextSummary, CategoryBreakdownEntry } from "./types";
 import { getCategoryInfo, CATEGORY_INFO } from "./types";
 import "./App.css";
 
 type Page = "dashboard" | "settings";
+
+type ContextMenuState =
+  | { kind: "app"; x: number; y: number; appName: string }
+  | { kind: "context"; x: number; y: number; appName: string; context: string };
 
 function App() {
   const [currentPage, setCurrentPage] = useState<Page>("dashboard");
@@ -39,15 +43,11 @@ function App() {
     baseline_ms: null,
   });
   const [appBreakdown, setAppBreakdown] = useState<AppSummary[]>([]);
-  const [categoryBreakdown, setCategoryBreakdown] = useState<[string, number][]>([]);
+  const [categoryBreakdown, setCategoryBreakdown] = useState<CategoryBreakdownEntry[]>([]);
   const [dayOffset, setDayOffset] = useState(0);
   const [dayLabel, setDayLabel] = useState("Today");
   const [showActiveOnly, setShowActiveOnly] = useState(true);
-  const [contextMenu, setContextMenu] = useState<{
-    x: number;
-    y: number;
-    appName: string;
-  } | null>(null);
+  const [contextMenu, setContextMenu] = useState<ContextMenuState | null>(null);
   const [dayStartHour, setDayStartHourState] = useState(6);
   const [autostartEnabled, setAutostartEnabledState] = useState(false);
   const [exportStatus, setExportStatus] = useState<string | null>(null);
@@ -187,6 +187,12 @@ function App() {
     return () => window.removeEventListener("click", handleClick);
   }, []);
 
+  // Collapse expanded app when changing days (contexts are day-specific)
+  useEffect(() => {
+    setExpandedApp(null);
+    setAppContexts([]);
+  }, [dayOffset]);
+
   const handleStart = async () => {
     try {
       const state = await startTracking();
@@ -210,15 +216,53 @@ function App() {
 
   const handleContextMenu = (e: React.MouseEvent, appName: string) => {
     e.preventDefault();
-    setContextMenu({ x: e.clientX, y: e.clientY, appName });
+    setContextMenu({ kind: "app", x: e.clientX, y: e.clientY, appName });
+  };
+
+  const handleContextRowContextMenu = (
+    e: React.MouseEvent,
+    appName: string,
+    context: string
+  ) => {
+    e.preventDefault();
+    e.stopPropagation();
+    setContextMenu({ kind: "context", x: e.clientX, y: e.clientY, appName, context });
   };
 
   const handleSetCategory = async (category: string) => {
     if (!contextMenu) return;
     try {
-      await setAppCategory(contextMenu.appName, category, dayOffset);
+      if (contextMenu.kind === "app") {
+        await setAppCategory(contextMenu.appName, category, dayOffset);
+      } else {
+        if (contextMenu.context === "other") {
+          alert("Cannot create a rule for 'other'. Pick a specific site/context.");
+          setContextMenu(null);
+          return;
+        }
+        await createRule(
+          contextMenu.appName,
+          contextMenu.context,
+          "contains",
+          category,
+          null
+        );
+        loadRules();
+      }
       setContextMenu(null);
       loadBreakdown();
+
+      if (expandedApp) {
+        setContextsLoading(true);
+        try {
+          const contexts = await getAppContexts(expandedApp, dayOffset);
+          setAppContexts(contexts);
+        } catch (err) {
+          console.error("Failed to reload app contexts:", err);
+        } finally {
+          setContextsLoading(false);
+        }
+      }
     } catch (err) {
       console.error("Failed to set category:", err);
     }
@@ -290,6 +334,18 @@ function App() {
       await deleteRule(ruleId);
       loadRules();
       loadBreakdown(); // Refresh to show new categorizations
+
+      if (expandedApp) {
+        setContextsLoading(true);
+        try {
+          const contexts = await getAppContexts(expandedApp, dayOffset);
+          setAppContexts(contexts);
+        } catch (err) {
+          console.error("Failed to reload app contexts:", err);
+        } finally {
+          setContextsLoading(false);
+        }
+      }
     } catch (err) {
       console.error("Failed to delete rule:", err);
     }
@@ -329,6 +385,18 @@ function App() {
       setShowRuleForm(false);
       loadRules();
       loadBreakdown(); // Refresh to show new categorizations
+
+      if (expandedApp) {
+        setContextsLoading(true);
+        try {
+          const contexts = await getAppContexts(expandedApp, dayOffset);
+          setAppContexts(contexts);
+        } catch (err) {
+          console.error("Failed to reload app contexts:", err);
+        } finally {
+          setContextsLoading(false);
+        }
+      }
     } catch (err) {
       console.error("Failed to save rule:", err);
     }
@@ -384,6 +452,18 @@ function App() {
       loadSuggestions();
       loadRules(); // New rule was created
       loadBreakdown(); // Categories might have changed
+
+      if (expandedApp) {
+        setContextsLoading(true);
+        try {
+          const contexts = await getAppContexts(expandedApp, dayOffset);
+          setAppContexts(contexts);
+        } catch (err) {
+          console.error("Failed to reload app contexts:", err);
+        } finally {
+          setContextsLoading(false);
+        }
+      }
     } catch (err) {
       console.error("Failed to approve suggestion:", err);
     }
@@ -452,19 +532,19 @@ function App() {
   }).filter((app) => app.displayMs >= 5000);
 
   // Compute category breakdown that respects showActiveOnly filter
-  const activeCategoryBreakdown = useMemo(() => {
+  // Now uses segment-level categories from backend (properly handles mixed-use apps like browsers)
+  const activeCategoryBreakdown: [string, number][] = useMemo(() => {
     if (!showActiveOnly) {
-      return categoryBreakdown;
+      // Return total_ms for each category
+      return categoryBreakdown
+        .map((entry) => [entry.category, entry.total_ms] as [string, number])
+        .sort((a, b) => b[1] - a[1]);
     }
-    // Compute from app breakdown with idle subtracted
-    const catMap = new Map<string, number>();
-    for (const app of appBreakdown) {
-      const cat = app.primary_category || "unknown";
-      const activeMs = app.total_duration_ms - app.idle_duration_ms;
-      catMap.set(cat, (catMap.get(cat) || 0) + activeMs);
-    }
-    return Array.from(catMap.entries()).sort((a, b) => b[1] - a[1]);
-  }, [showActiveOnly, categoryBreakdown, appBreakdown]);
+    // Return active_ms (total - idle) for each category
+    return categoryBreakdown
+      .map((entry) => [entry.category, entry.total_ms - entry.idle_ms] as [string, number])
+      .sort((a, b) => b[1] - a[1]);
+  }, [showActiveOnly, categoryBreakdown]);
 
   // Calculate total for percentage
   const totalMs = activeCategoryBreakdown
@@ -640,7 +720,13 @@ function App() {
                                     ? ctx.total_duration_ms - ctx.idle_duration_ms
                                     : ctx.total_duration_ms;
                                   return (
-                                    <div key={ctx.context} className="context-row">
+                                    <div
+                                      key={ctx.context}
+                                      className="context-row"
+                                      onContextMenu={(e) =>
+                                        handleContextRowContextMenu(e, app.app_name, ctx.context)
+                                      }
+                                    >
                                       <span className="context-name">
                                         <span className="context-icon">{ctxCatInfo.emoji}</span>
                                         {ctx.context}

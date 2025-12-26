@@ -154,11 +154,19 @@ fn get_app_breakdown(
     Ok(filtered)
 }
 
+/// Category breakdown entry: (category, total_ms, idle_ms)
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct CategoryBreakdownEntry {
+    pub category: String,
+    pub total_ms: i64,
+    pub idle_ms: i64,
+}
+
 #[tauri::command]
 fn get_category_breakdown(
     state: State<AppState>,
     day_offset: i32,
-) -> Result<Vec<(String, i64)>, String> {
+) -> Result<Vec<CategoryBreakdownEntry>, String> {
     let day_start_hour = state
         .storage
         .get_day_start_hour()
@@ -173,10 +181,19 @@ fn get_category_breakdown(
 
     // Use segment-level category breakdown (not app-level)
     // This properly handles browsers where different sites have different categories
-    state
+    let breakdown = state
         .storage
         .get_segment_category_breakdown(start_ms, end_ms)
-        .map_err(|e| e.to_string())
+        .map_err(|e| e.to_string())?;
+
+    Ok(breakdown
+        .into_iter()
+        .map(|(category, total_ms, idle_ms)| CategoryBreakdownEntry {
+            category,
+            total_ms,
+            idle_ms,
+        })
+        .collect())
 }
 
 #[tauri::command]
@@ -238,7 +255,7 @@ fn set_app_category(
         let label = Label {
             title_hash: segment.title_hash.clone(),
             category: category.clone(),
-            source: LabelSource::User,
+            source: LabelSource::Manual, // Direct user assignment (highest priority)
             confidence: None,
             updated_at: utils::now_ms(),
         };
@@ -399,6 +416,9 @@ fn get_rule(state: State<AppState>, rule_id: String) -> Result<Option<Classifica
     state.storage.get_rule(&rule_id).map_err(|e| e.to_string())
 }
 
+/// Default number of days to backfill when a rule is created/edited
+const BACKFILL_DAYS: u32 = 7;
+
 #[tauri::command]
 fn create_rule(
     state: State<AppState>,
@@ -422,6 +442,12 @@ fn create_rule(
     };
 
     state.storage.upsert_rule(&rule).map_err(|e| e.to_string())?;
+
+    // Backfill labels for matching segments (last N days)
+    if let Err(e) = state.storage.backfill_labels_for_rule(&rule, BACKFILL_DAYS) {
+        eprintln!("Warning: backfill failed for rule {}: {}", rule.rule_id, e);
+    }
+
     Ok(rule)
 }
 
@@ -457,7 +483,16 @@ fn update_rule(
         created_at: existing.created_at, // Preserve original creation time
     };
 
-    state.storage.upsert_rule(&rule).map_err(|e| e.to_string())
+    state.storage.upsert_rule(&rule).map_err(|e| e.to_string())?;
+
+    // Backfill labels for matching segments (last N days) if rule is enabled
+    if rule.enabled {
+        if let Err(e) = state.storage.backfill_labels_for_rule(&rule, BACKFILL_DAYS) {
+            eprintln!("Warning: backfill failed for rule {}: {}", rule.rule_id, e);
+        }
+    }
+
+    Ok(())
 }
 
 #[tauri::command]
@@ -572,6 +607,11 @@ fn approve_suggestion(state: State<AppState>, suggestion_id: String) -> Result<C
 
     // Save the rule
     state.storage.upsert_rule(&rule).map_err(|e| e.to_string())?;
+
+    // Backfill labels for matching segments (last N days)
+    if let Err(e) = state.storage.backfill_labels_for_rule(&rule, BACKFILL_DAYS) {
+        eprintln!("Warning: backfill failed for rule {}: {}", rule.rule_id, e);
+    }
 
     // Mark suggestion as approved
     state

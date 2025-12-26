@@ -1,7 +1,7 @@
 // API functions for communicating with the Tauri backend
 
 import { invoke } from "@tauri-apps/api/core";
-import type { TrackingState, AppSummary, ClassificationRule, RulePreview, MatchType, ContextSummary, AiSuggestion } from "./types";
+import type { TrackingState, AppSummary, ClassificationRule, RulePreview, MatchType, ContextSummary, AiSuggestion, CategoryBreakdownEntry } from "./types";
 
 export async function startTracking(): Promise<TrackingState> {
   return await invoke("start_tracking");
@@ -21,7 +21,7 @@ export async function getAppBreakdown(dayOffset: number): Promise<AppSummary[]> 
 
 export async function getCategoryBreakdown(
   dayOffset: number
-): Promise<[string, number][]> {
+): Promise<CategoryBreakdownEntry[]> {
   return await invoke("get_category_breakdown", { dayOffset });
 }
 

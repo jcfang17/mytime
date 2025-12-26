@@ -49,8 +49,9 @@ pub struct Label {
 #[serde(rename_all = "lowercase")]
 pub enum LabelSource {
     Heuristic,
-    User,
+    User,    // From classification rules
     Ai,
+    Manual,  // Direct user assignment (highest priority)
 }
 
 impl LabelSource {
@@ -59,6 +60,7 @@ impl LabelSource {
             LabelSource::Heuristic => "heuristic",
             LabelSource::User => "user",
             LabelSource::Ai => "ai",
+            LabelSource::Manual => "manual",
         }
     }
 
@@ -67,6 +69,7 @@ impl LabelSource {
             "heuristic" => Some(LabelSource::Heuristic),
             "user" => Some(LabelSource::User),
             "ai" => Some(LabelSource::Ai),
+            "manual" => Some(LabelSource::Manual),
             _ => None,
         }
     }

@@ -235,14 +235,24 @@ pub fn extract_browser_context(window_title: &str) -> Option<String> {
 
     // Try to extract from common patterns
     // Pattern 1: "... - Site Name" or "... | Site Name" or "... – Site Name"
+    // Work backwards through separators to skip browser name suffixes
     let separators = [" - ", " | ", " – ", " — ", " · "];
 
     for sep in separators {
-        if let Some(pos) = title.rfind(sep) {
-            let site = title[pos + sep.len()..].trim();
+        // Find all occurrences and try from rightmost, skipping invalid contexts
+        let mut search_str = title;
+        while let Some(pos) = search_str.rfind(sep) {
+            let site = search_str[pos + sep.len()..].trim();
             if is_valid_context(site) {
-                return Some(normalize_context(site));
+                // Normalize, then validate again; this avoids returning values like
+                // "Microsoft Edge - Personal" which normalize down to "microsoft edge".
+                let normalized = normalize_context(site);
+                if is_valid_context(&normalized) {
+                    return Some(normalized);
+                }
             }
+            // Try earlier occurrence
+            search_str = &search_str[..pos];
         }
     }
 
@@ -271,15 +281,44 @@ fn is_valid_context(s: &str) -> bool {
     if s.len() > 50 {
         return false;
     }
-    // Reject common non-site strings
     let lower = s.to_lowercase();
+
+    // Reject common non-site strings (partial match)
     let reject_patterns = [
-        "untitled", "new tab", "loading", "personal", "and more",
+        "untitled", "new tab", "loading", "and more",
         "search results", "google search", "bing search",
     ];
     if reject_patterns.iter().any(|p| lower.contains(p)) {
         return false;
     }
+
+    // Reject browser names (exact or with profile suffix like "Microsoft Edge - Work")
+    let browser_names = [
+        "microsoft edge", "google chrome", "mozilla firefox",
+        "brave", "opera", "vivaldi", "safari", "chromium",
+        "edge", "chrome", "firefox",
+    ];
+    // Check if it IS a browser name or STARTS WITH a browser name (handles "Microsoft Edge - Work")
+    if browser_names.iter().any(|b| lower == *b || lower.starts_with(&format!("{} -", b))) {
+        return false;
+    }
+
+    // Also reject variants that contain a browser brand name but don't use the " - " separator,
+    // e.g. "Microsoft Edge (Work)".
+    let browser_brands = ["microsoft edge", "google chrome", "mozilla firefox"];
+    if browser_brands.iter().any(|b| lower.contains(b)) {
+        return false;
+    }
+
+    // Reject exact profile names (case-insensitive)
+    let profile_names = [
+        "personal", "work", "default", "profile 1", "profile 2",
+        "guest", "incognito", "private",
+    ];
+    if profile_names.iter().any(|p| lower == *p) {
+        return false;
+    }
+
     true
 }
 
@@ -438,5 +477,31 @@ mod tests {
         // Empty/invalid
         assert_eq!(extract_browser_context(""), None);
         assert_eq!(extract_browser_context("New Tab"), None);
+
+        // Browser names should be rejected as contexts
+        assert_eq!(extract_browser_context("New Tab - Microsoft Edge"), None);
+        assert_eq!(extract_browser_context("Settings - Google Chrome"), None);
+        assert_eq!(extract_browser_context("Microsoft Edge"), None);
+
+        // But pages about browsers should work
+        assert_eq!(
+            extract_browser_context("Edge computing - Wikipedia"),
+            Some("wikipedia".to_string())
+        );
+
+        // Multi-separator: skip browser name suffix and profile name
+        assert_eq!(
+            extract_browser_context("anthropics/claude-code - GitHub - Personal - Microsoft Edge"),
+            Some("github".to_string())
+        );
+        assert_eq!(
+            extract_browser_context("YouTube - Work - Google Chrome"),
+            Some("youtube".to_string())
+        );
+
+        // Browser name with profile suffix should be rejected
+        assert_eq!(extract_browser_context("Page - Microsoft Edge - Work"), None);
+        assert_eq!(extract_browser_context("Page - Microsoft Edge - Personal"), None);
+        assert_eq!(extract_browser_context("Tab - Google Chrome - Profile 1"), None);
     }
 }
