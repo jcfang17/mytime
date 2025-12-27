@@ -191,6 +191,50 @@ body {
   margin-bottom: 24px;
 }
 
+.category-summary {
+  display: flex;
+  align-items: center;
+  gap: 16px;
+  margin-bottom: 12px;
+  font-size: 14px;
+}
+
+.summary-total {
+  color: var(--text-secondary);
+}
+
+.summary-total strong {
+  color: var(--text-primary);
+}
+
+.summary-idle {
+  color: var(--text-muted);
+}
+
+.summary-selected {
+  color: var(--accent-primary);
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.summary-selected strong {
+  color: var(--accent-primary);
+}
+
+.btn-xs {
+  padding: 2px 6px;
+  font-size: 10px;
+  border-radius: 4px;
+  background-color: var(--bg-tertiary);
+  color: var(--text-secondary);
+}
+
+.btn-xs:hover:not(:disabled) {
+  background-color: #475569;
+  color: var(--text-primary);
+}
+
 .category-chips {
   display: flex;
   flex-wrap: wrap;
@@ -205,6 +249,19 @@ body {
   background-color: var(--bg-secondary);
   border: 2px solid;
   border-radius: 12px;
+  cursor: pointer;
+  transition: all 0.15s ease;
+  user-select: none;
+}
+
+.category-chip:hover {
+  transform: translateY(-1px);
+  box-shadow: var(--shadow);
+}
+
+.category-chip.selected {
+  transform: translateY(-2px);
+  box-shadow: 0 4px 12px -2px rgba(0, 0, 0, 0.4);
 }
 
 .category-emoji {

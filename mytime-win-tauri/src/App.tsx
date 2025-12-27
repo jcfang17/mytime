@@ -73,6 +73,9 @@ function App() {
   const [appContexts, setAppContexts] = useState<ContextSummary[]>([]);
   const [contextsLoading, setContextsLoading] = useState(false);
 
+  // Category selection state (for adding up selected categories)
+  const [selectedCategories, setSelectedCategories] = useState<Set<string>>(new Set());
+
   // Load tracking state (fast poll)
   const loadTrackingState = useCallback(async () => {
     try {
@@ -538,18 +541,44 @@ function App() {
       // Return total_ms for each category
       return categoryBreakdown
         .map((entry) => [entry.category, entry.total_ms] as [string, number])
+        .filter(([, ms]) => ms >= 5000)
         .sort((a, b) => b[1] - a[1]);
     }
     // Return active_ms (total - idle) for each category
     return categoryBreakdown
       .map((entry) => [entry.category, entry.total_ms - entry.idle_ms] as [string, number])
+      .filter(([, ms]) => ms >= 5000)
       .sort((a, b) => b[1] - a[1]);
   }, [showActiveOnly, categoryBreakdown]);
 
-  // Calculate total for percentage
-  const totalMs = activeCategoryBreakdown
-    .filter(([cat]) => cat !== "unknown")
-    .reduce((sum, [, ms]) => sum + ms, 0);
+  // Calculate total idle time across all categories
+  const totalIdleMs = useMemo(() => {
+    return categoryBreakdown.reduce((sum, entry) => sum + entry.idle_ms, 0);
+  }, [categoryBreakdown]);
+
+  // Calculate total tracked time (all categories)
+  const totalTrackedMs = activeCategoryBreakdown.reduce((sum, [, ms]) => sum + ms, 0);
+
+  // Calculate selected categories total
+  const selectedTotalMs = useMemo(() => {
+    if (selectedCategories.size === 0) return 0;
+    return activeCategoryBreakdown
+      .filter(([cat]) => selectedCategories.has(cat))
+      .reduce((sum, [, ms]) => sum + ms, 0);
+  }, [selectedCategories, activeCategoryBreakdown]);
+
+  // Toggle category selection
+  const handleCategoryClick = (category: string) => {
+    setSelectedCategories((prev) => {
+      const next = new Set(prev);
+      if (next.has(category)) {
+        next.delete(category);
+      } else {
+        next.add(category);
+      }
+      return next;
+    });
+  };
 
   return (
     <div className="app-container">
@@ -612,22 +641,48 @@ function App() {
             {/* Category breakdown */}
             {activeCategoryBreakdown.length > 0 && (
               <section className="category-section">
+                {/* Summary row: total + idle + selected */}
+                <div className="category-summary">
+                  <span className="summary-total">
+                    {showActiveOnly ? "Active" : "Total"}: <strong>{formatDurationLocal(totalTrackedMs)}</strong>
+                  </span>
+                  {totalIdleMs > 0 && (
+                    <span className="summary-idle">
+                      💤 Idle: {formatDurationLocal(totalIdleMs)}
+                    </span>
+                  )}
+                  {selectedCategories.size > 0 && (
+                    <span className="summary-selected">
+                      Selected: <strong>{formatDurationLocal(selectedTotalMs)}</strong>
+                      <button
+                        className="btn btn-xs"
+                        onClick={() => setSelectedCategories(new Set())}
+                        title="Clear selection"
+                      >
+                        ✕
+                      </button>
+                    </span>
+                  )}
+                </div>
                 <div className="category-chips">
-                  {activeCategoryBreakdown
-                    .filter(([cat, ms]) => ms >= 5000 && cat !== "unknown")
-                    .slice(0, 4)
-                    .map(([cat, ms]) => {
-                      const info = getCategoryInfo(cat);
-                      const pct = totalMs > 0 ? Math.round((ms / totalMs) * 100) : 0;
-                      return (
-                        <div key={cat} className="category-chip" style={{ borderColor: info.color }}>
-                          <span className="category-emoji">{info.emoji}</span>
-                          <span className="category-name">{info.label}</span>
-                          <span className="category-time">{formatDurationLocal(ms)}</span>
-                          <span className="category-pct">{pct}%</span>
-                        </div>
-                      );
-                    })}
+                  {activeCategoryBreakdown.map(([cat, ms]) => {
+                    const info = getCategoryInfo(cat);
+                    const pct = totalTrackedMs > 0 ? Math.round((ms / totalTrackedMs) * 100) : 0;
+                    const isSelected = selectedCategories.has(cat);
+                    return (
+                      <div
+                        key={cat}
+                        className={`category-chip ${isSelected ? "selected" : ""}`}
+                        style={{ borderColor: info.color, backgroundColor: isSelected ? info.color + "20" : undefined }}
+                        onClick={() => handleCategoryClick(cat)}
+                      >
+                        <span className="category-emoji">{info.emoji}</span>
+                        <span className="category-name">{info.label}</span>
+                        <span className="category-time">{formatDurationLocal(ms)}</span>
+                        <span className="category-pct">{pct}%</span>
+                      </div>
+                    );
+                  })}
                 </div>
               </section>
             )}
