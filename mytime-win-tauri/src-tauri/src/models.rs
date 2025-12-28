@@ -132,6 +132,21 @@ pub struct ContextSummary {
     pub sample_titles: Vec<String>,     // Up to 3 example window titles
 }
 
+/// Breakdown row for selected categories (derived from segments).
+///
+/// For browsers, `context` is set to the extracted site (or `"other"` when unknown).
+/// For non-browsers, `context` is `None`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SelectedBreakdownRow {
+    pub app_name: String,
+    pub friendly_name: String,
+    pub context: Option<String>,
+    pub category: String,
+    pub total_duration_ms: i64,
+    pub idle_duration_ms: i64,
+    pub segment_count: u32,
+}
+
 /// Daily summary (derived from segments)
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct DailySummary {

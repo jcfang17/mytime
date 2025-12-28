@@ -84,6 +84,18 @@ export interface ContextSummary {
   sample_titles: string[];   // Up to 3 example window titles
 }
 
+// === Selected Breakdown (segment-level, respects mixed-use apps) ===
+
+export interface SelectedBreakdownRow {
+  app_name: string;
+  friendly_name: string;
+  context: string | null; // For browsers: extracted site (or "other"); otherwise null
+  category: string;
+  total_duration_ms: number;
+  idle_duration_ms: number;
+  segment_count: number;
+}
+
 // === AI Suggestions ===
 
 export type SuggestionStatus = "pending" | "approved" | "rejected" | "expired";

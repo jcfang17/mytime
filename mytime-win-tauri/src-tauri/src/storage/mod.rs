@@ -7,6 +7,7 @@ mod sqlite;
 pub use sqlite::SqliteStorage;
 
 use crate::models::{AiSuggestion, AppSummary, ClassificationRule, ContextSummary, DailySummary, Label, Segment};
+use crate::models::SelectedBreakdownRow;
 use std::error::Error;
 
 /// Result type for storage operations
@@ -64,6 +65,17 @@ pub trait StorageAdapter: Send + Sync {
         start_ms: i64,
         end_ms: i64,
     ) -> StorageResult<Vec<ContextSummary>>;
+
+    /// Get a breakdown of segments matching selected categories.
+    ///
+    /// For browsers, the result is grouped by (app, context, category).
+    /// For non-browsers, the result is grouped by (app, category).
+    fn get_selected_breakdown(
+        &self,
+        start_ms: i64,
+        end_ms: i64,
+        categories: &[String],
+    ) -> StorageResult<Vec<SelectedBreakdownRow>>;
 
     /// Get today's total active time in milliseconds
     fn get_today_active_ms(&self) -> StorageResult<i64>;

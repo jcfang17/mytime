@@ -125,6 +125,8 @@ All backend functionality exposed via `#[tauri::command]`:
 | `get_tracking_state` | Current status, time, baseline |
 | `get_app_breakdown` | Per-app time summary |
 | `get_category_breakdown` | Per-category totals |
+| `get_app_contexts` | Per-site breakdown within a browser app |
+| `get_selected_breakdown` | Segment-level breakdown for selected categories (app/site/category) |
 | `set_app_category` | User category override |
 | `get_day_start_hour` / `set_day_start_hour` | Day boundary config |
 | `export_csv` | Export with save dialog |

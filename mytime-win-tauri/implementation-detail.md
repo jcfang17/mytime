@@ -44,6 +44,15 @@ fn stop_tracking(state: State<AppState>) -> Result<TrackingState, String>
 fn get_app_breakdown(state: State<AppState>, day_offset: i32) -> Result<Vec<AppSummary>, String>
 
 #[tauri::command]
+fn get_category_breakdown(state: State<AppState>, day_offset: i32) -> Result<Vec<(String, i64, i64)>, String>
+
+#[tauri::command]
+fn get_app_contexts(state: State<AppState>, app_name: String, day_offset: i32) -> Result<Vec<ContextSummary>, String>
+
+#[tauri::command]
+fn get_selected_breakdown(state: State<AppState>, day_offset: i32, categories: Vec<String>) -> Result<Vec<SelectedBreakdownRow>, String>
+
+#[tauri::command]
 async fn export_csv(app: AppHandle, state: State<'_, AppState>, day_offset: i32) -> Result<usize, String>
 ```
 
@@ -147,6 +156,20 @@ fn get_app_breakdown(&self, start_ms: i64, end_ms: i64) -> StorageResult<Vec<App
     // 1. Aggregate segments by app_name
     // 2. For each app, find dominant category from labels
     // 3. Return sorted by duration descending
+}
+
+// Get selected breakdown (segment-level; respects mixed-use apps like browsers)
+fn get_selected_breakdown(
+    &self,
+    start_ms: i64,
+    end_ms: i64,
+    categories: &[String],
+) -> StorageResult<Vec<SelectedBreakdownRow>> {
+    // 1. Join segments -> best label per title_hash (manual > user > ai > heuristic)
+    // 2. Filter to selected categories
+    // 3. Group:
+    //    - Browsers: (app, extracted_site_or_other, category)
+    //    - Other apps: (app, category)
 }
 ```
 
@@ -254,18 +277,31 @@ const displayTimeMs = trackingState.is_tracking && trackingState.baseline_ms !==
 
 **Active Category Breakdown:**
 ```typescript
-const activeCategoryBreakdown = useMemo(() => {
-    if (!showActiveOnly) return categoryBreakdown;
-
-    const catMap = new Map<string, number>();
-    for (const app of appBreakdown) {
-        const cat = app.primary_category || "unknown";
-        const activeMs = app.total_duration_ms - app.idle_duration_ms;
-        catMap.set(cat, (catMap.get(cat) || 0) + activeMs);
+const activeCategoryBreakdown: [string, number][] = useMemo(() => {
+    if (!showActiveOnly) {
+        // Return total_ms for each category
+        return categoryBreakdown
+            .map((entry) => [entry.category, entry.total_ms] as [string, number])
+            .filter(([, ms]) => ms >= 5000)
+            .sort((a, b) => b[1] - a[1]);
     }
-    return Array.from(catMap.entries()).sort((a, b) => b[1] - a[1]);
-}, [showActiveOnly, categoryBreakdown, appBreakdown]);
+
+    // Return active_ms (total - idle) for each category
+    return categoryBreakdown
+        .map((entry) => [entry.category, entry.total_ms - entry.idle_ms] as [string, number])
+        .filter(([, ms]) => ms >= 5000)
+        .sort((a, b) => b[1] - a[1]);
+}, [showActiveOnly, categoryBreakdown]);
 ```
+
+### Selected Breakdown (segment-level)
+
+The category chips are computed from per-segment labels, so mixed-use apps (notably browsers) can legitimately contribute time to multiple categories. The "Selected Breakdown" view uses `get_selected_breakdown` to avoid time appearing "lost" when filtering by category.
+
+**Gotchas:**
+- Rows under 5 seconds are collapsed into **Other (small items)**.
+- Browsers may show **Other sites** when the window title can't be mapped to a site; rules can't be created for `other`.
+- Edge window titles can include "and N more pages" and invisible characters; context extraction normalizes these but can still fall back to `other` for uncommon formats.
 
 ---
 
@@ -280,6 +316,17 @@ export async function startTracking(): Promise<TrackingState> {
 
 export async function getAppBreakdown(dayOffset: number): Promise<AppSummary[]> {
     return await invoke("get_app_breakdown", { dayOffset });
+}
+
+export async function getCategoryBreakdown(dayOffset: number): Promise<CategoryBreakdownEntry[]> {
+    return await invoke("get_category_breakdown", { dayOffset });
+}
+
+export async function getSelectedBreakdown(
+    dayOffset: number,
+    categories: string[]
+): Promise<SelectedBreakdownRow[]> {
+    return await invoke("get_selected_breakdown", { dayOffset, categories });
 }
 
 export async function exportCsv(dayOffset: number): Promise<number> {

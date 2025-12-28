@@ -33,8 +33,9 @@
 ### Pending / Future Work
 
 #### Analytics Improvements
-- [ ] Segment-level category breakdown (currently app-level)
-- [ ] When user/AI labels added: join only highest-priority label per hash
+- [x] Segment-level "Selected Breakdown" (per app/site/category)
+- [ ] Segment-level breakdown for main app list (currently dominant-category per app)
+- [ ] Apply best-label selection (manual > user > ai > heuristic) to all aggregate queries
 - [ ] Historical data views (week, month)
 
 #### macOS Parity
@@ -98,8 +99,8 @@ config (key-value settings)
 ### Known Limitations (OK for v1)
 
 - 2s shift at session start (stable-title tradeoff)
-- Category breakdown at app level, not segment level
-- Label double-counting possible when user/AI labels added
+- Main app list uses dominant category (browsers can be mixed-use; use Selected Breakdown for accurate per-category accounting)
+- Some aggregate queries may double-count labels if multiple label sources exist (Selected Breakdown already picks the best label)
 
 ---
 

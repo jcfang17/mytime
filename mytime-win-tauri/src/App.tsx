@@ -23,8 +23,20 @@ import {
   approveSuggestion,
   rejectSuggestion,
   getAppContexts,
+  getSelectedBreakdown,
 } from "./api";
-import type { TrackingState, AppSummary, Category, ClassificationRule, MatchType, RulePreview, AiSuggestion, ContextSummary, CategoryBreakdownEntry } from "./types";
+import type {
+  TrackingState,
+  AppSummary,
+  Category,
+  ClassificationRule,
+  MatchType,
+  RulePreview,
+  AiSuggestion,
+  ContextSummary,
+  CategoryBreakdownEntry,
+  SelectedBreakdownRow,
+} from "./types";
 import { getCategoryInfo, CATEGORY_INFO } from "./types";
 import "./App.css";
 
@@ -33,6 +45,9 @@ type Page = "dashboard" | "settings";
 type ContextMenuState =
   | { kind: "app"; x: number; y: number; appName: string }
   | { kind: "context"; x: number; y: number; appName: string; context: string };
+
+const BROWSER_APP_RE =
+  /^(msedge|chrome|firefox|brave|opera|vivaldi|arc|safari)/i;
 
 function App() {
   const [currentPage, setCurrentPage] = useState<Page>("dashboard");
@@ -73,8 +88,15 @@ function App() {
   const [appContexts, setAppContexts] = useState<ContextSummary[]>([]);
   const [contextsLoading, setContextsLoading] = useState(false);
 
+  // Cached contexts for browser drill-down (expanded app)
+  const [contextsByApp, setContextsByApp] = useState<Record<string, ContextSummary[]>>({});
+
   // Category selection state (for adding up selected categories)
   const [selectedCategories, setSelectedCategories] = useState<Set<string>>(new Set());
+
+  // Selected breakdown (segment-level, for selected category chips)
+  const [selectedBreakdown, setSelectedBreakdown] = useState<SelectedBreakdownRow[]>([]);
+  const [selectedBreakdownLoading, setSelectedBreakdownLoading] = useState(false);
 
   // Load tracking state (fast poll)
   const loadTrackingState = useCallback(async () => {
@@ -101,6 +123,23 @@ function App() {
       console.error("Failed to load breakdown:", err);
     }
   }, [dayOffset]);
+
+  const loadSelectedBreakdown = useCallback(async () => {
+    if (selectedCategories.size === 0) {
+      setSelectedBreakdown([]);
+      return;
+    }
+
+    try {
+      setSelectedBreakdownLoading(true);
+      const rows = await getSelectedBreakdown(dayOffset, Array.from(selectedCategories));
+      setSelectedBreakdown(rows);
+    } catch (err) {
+      console.error("Failed to load selected breakdown:", err);
+    } finally {
+      setSelectedBreakdownLoading(false);
+    }
+  }, [dayOffset, selectedCategories]);
 
   // Load settings
   const loadSettings = useCallback(async () => {
@@ -157,6 +196,17 @@ function App() {
     return () => clearInterval(interval);
   }, [loadBreakdown]);
 
+  // Keep selected breakdown in sync (immediate + slow poll when active)
+  useEffect(() => {
+    loadSelectedBreakdown();
+  }, [loadSelectedBreakdown]);
+
+  useEffect(() => {
+    if (selectedCategories.size === 0) return;
+    const interval = setInterval(loadSelectedBreakdown, 5000);
+    return () => clearInterval(interval);
+  }, [loadSelectedBreakdown, selectedCategories.size]);
+
   // Listen for tray events
   useEffect(() => {
     const unlistenStart = listen("tray-start", async () => {
@@ -194,7 +244,22 @@ function App() {
   useEffect(() => {
     setExpandedApp(null);
     setAppContexts([]);
+    setContextsByApp({});
   }, [dayOffset]);
+
+  const reloadExpandedAppContexts = useCallback(async () => {
+    if (!expandedApp) return;
+    setContextsLoading(true);
+    try {
+      const contexts = await getAppContexts(expandedApp, dayOffset);
+      setAppContexts(contexts);
+      setContextsByApp((prev) => ({ ...prev, [expandedApp]: contexts }));
+    } catch (err) {
+      console.error("Failed to reload app contexts:", err);
+    } finally {
+      setContextsLoading(false);
+    }
+  }, [dayOffset, expandedApp]);
 
   const handleStart = async () => {
     try {
@@ -254,18 +319,9 @@ function App() {
       }
       setContextMenu(null);
       loadBreakdown();
-
-      if (expandedApp) {
-        setContextsLoading(true);
-        try {
-          const contexts = await getAppContexts(expandedApp, dayOffset);
-          setAppContexts(contexts);
-        } catch (err) {
-          console.error("Failed to reload app contexts:", err);
-        } finally {
-          setContextsLoading(false);
-        }
-      }
+      setContextsByApp({});
+      await reloadExpandedAppContexts();
+      await loadSelectedBreakdown();
     } catch (err) {
       console.error("Failed to set category:", err);
     }
@@ -276,6 +332,9 @@ function App() {
       await setDayStartHour(hour);
       setDayStartHourState(hour);
       loadBreakdown(); // Refresh data with new day boundary
+      setContextsByApp({});
+      await reloadExpandedAppContexts();
+      await loadSelectedBreakdown();
     } catch (err) {
       console.error("Failed to set day start hour:", err);
     }
@@ -337,18 +396,9 @@ function App() {
       await deleteRule(ruleId);
       loadRules();
       loadBreakdown(); // Refresh to show new categorizations
-
-      if (expandedApp) {
-        setContextsLoading(true);
-        try {
-          const contexts = await getAppContexts(expandedApp, dayOffset);
-          setAppContexts(contexts);
-        } catch (err) {
-          console.error("Failed to reload app contexts:", err);
-        } finally {
-          setContextsLoading(false);
-        }
-      }
+      setContextsByApp({});
+      await reloadExpandedAppContexts();
+      await loadSelectedBreakdown();
     } catch (err) {
       console.error("Failed to delete rule:", err);
     }
@@ -388,18 +438,9 @@ function App() {
       setShowRuleForm(false);
       loadRules();
       loadBreakdown(); // Refresh to show new categorizations
-
-      if (expandedApp) {
-        setContextsLoading(true);
-        try {
-          const contexts = await getAppContexts(expandedApp, dayOffset);
-          setAppContexts(contexts);
-        } catch (err) {
-          console.error("Failed to reload app contexts:", err);
-        } finally {
-          setContextsLoading(false);
-        }
-      }
+      setContextsByApp({});
+      await reloadExpandedAppContexts();
+      await loadSelectedBreakdown();
     } catch (err) {
       console.error("Failed to save rule:", err);
     }
@@ -443,6 +484,10 @@ function App() {
         rule.priority
       );
       loadRules();
+      loadBreakdown(); // Categories might have changed
+      setContextsByApp({});
+      await reloadExpandedAppContexts();
+      await loadSelectedBreakdown();
     } catch (err) {
       console.error("Failed to toggle rule:", err);
     }
@@ -455,18 +500,9 @@ function App() {
       loadSuggestions();
       loadRules(); // New rule was created
       loadBreakdown(); // Categories might have changed
-
-      if (expandedApp) {
-        setContextsLoading(true);
-        try {
-          const contexts = await getAppContexts(expandedApp, dayOffset);
-          setAppContexts(contexts);
-        } catch (err) {
-          console.error("Failed to reload app contexts:", err);
-        } finally {
-          setContextsLoading(false);
-        }
-      }
+      setContextsByApp({});
+      await reloadExpandedAppContexts();
+      await loadSelectedBreakdown();
     } catch (err) {
       console.error("Failed to approve suggestion:", err);
     }
@@ -490,10 +526,16 @@ function App() {
     } else {
       // Expand and load contexts
       setExpandedApp(appName);
+      const cached = contextsByApp[appName];
+      if (cached) {
+        setAppContexts(cached);
+      }
+
       setContextsLoading(true);
       try {
         const contexts = await getAppContexts(appName, dayOffset);
         setAppContexts(contexts);
+        setContextsByApp((prev) => ({ ...prev, [appName]: contexts }));
       } catch (err) {
         console.error("Failed to load app contexts:", err);
         setAppContexts([]);
@@ -566,6 +608,27 @@ function App() {
       .filter(([cat]) => selectedCategories.has(cat))
       .reduce((sum, [, ms]) => sum + ms, 0);
   }, [selectedCategories, activeCategoryBreakdown]);
+
+  const selectedBreakdownView = useMemo(() => {
+    const thresholdMs = 5000;
+
+    const rows = selectedBreakdown
+      .map((row) => {
+        const displayMs = showActiveOnly
+          ? row.total_duration_ms - row.idle_duration_ms
+          : row.total_duration_ms;
+        return { ...row, displayMs };
+      })
+      .filter((row) => row.displayMs > 0)
+      .sort((a, b) => b.displayMs - a.displayMs);
+
+    const visibleRows = rows.filter((row) => row.displayMs >= thresholdMs);
+    const visibleTotalMs = visibleRows.reduce((sum, row) => sum + row.displayMs, 0);
+    const totalMs = rows.reduce((sum, row) => sum + row.displayMs, 0);
+    const otherMs = totalMs - visibleTotalMs;
+
+    return { visibleRows, otherMs, totalMs };
+  }, [selectedBreakdown, showActiveOnly]);
 
   // Toggle category selection
   const handleCategoryClick = (category: string) => {
@@ -712,8 +775,93 @@ function App() {
 
             {/* App list */}
             <section className="app-list">
-              <h2>Application Usage</h2>
-              {filteredApps.length === 0 ? (
+              <h2>
+                {selectedCategories.size > 0
+                  ? "Selected Breakdown"
+                  : "Application Usage"}
+              </h2>
+              {selectedCategories.size > 0 && (
+                <p className="setting-description">
+                  Click category chips above to filter what's shown here (browsers are broken down
+                  by site).
+                </p>
+              )}
+              {selectedCategories.size > 0 ? (
+                <div className="app-table">
+                  <div className="app-row header">
+                    <span className="app-name">Activity</span>
+                    <span className="app-time">Time</span>
+                    <span className="app-idle">Idle</span>
+                  </div>
+                  {selectedBreakdownView.visibleRows.length === 0 ? (
+                    <div className="app-row">
+                      <span
+                        className="app-name"
+                        style={{ color: "var(--text-muted)" }}
+                      >
+                        {selectedBreakdownLoading
+                          ? "Loading breakdown..."
+                          : "No matching activity"}
+                      </span>
+                      <span className="app-time">-</span>
+                      <span className="app-idle">-</span>
+                    </div>
+                  ) : (
+                    <>
+                      {selectedBreakdownView.visibleRows.map((row) => {
+                        const catInfo = getCategoryInfo(row.category);
+                        const contextLabel =
+                          row.context === "other" ? "Other sites" : row.context;
+                        const label = row.context
+                          ? `${row.friendly_name} · ${contextLabel}`
+                          : row.friendly_name;
+                        return (
+                          <div
+                            key={`${row.app_name}:${row.context || ""}:${row.category}`}
+                            className="app-row"
+                            onContextMenu={(e) =>
+                              row.context
+                                ? handleContextRowContextMenu(
+                                    e,
+                                    row.app_name,
+                                    row.context
+                                  )
+                                : handleContextMenu(e, row.app_name)
+                            }
+                          >
+                            <span className="app-name">
+                              <span className="app-icon">{catInfo.emoji}</span>
+                              {label}
+                            </span>
+                            <span className="app-time">
+                              {formatDurationLocal(row.displayMs)}
+                            </span>
+                            <span className="app-idle">
+                              {row.idle_duration_ms > 0
+                                ? `?? ${formatDurationLocal(row.idle_duration_ms)}`
+                                : "-"}
+                            </span>
+                          </div>
+                        );
+                      })}
+                      {selectedBreakdownView.otherMs >= 1000 && (
+                        <div key="other-small" className="app-row">
+                          <span
+                            className="app-name"
+                            style={{ color: "var(--text-muted)" }}
+                          >
+                            Other (small items)
+                          </span>
+                          <span className="app-time">
+                            {formatDurationLocal(selectedBreakdownView.otherMs)}
+                          </span>
+                          <span className="app-idle">-</span>
+                        </div>
+                      )}
+                    </>
+                  )}
+                </div>
+              ) : filteredApps.length === 0 ? (
                 <p className="no-data">No activity tracked yet</p>
               ) : (
                 <div className="app-table">
@@ -724,9 +872,7 @@ function App() {
                   </div>
                   {filteredApps.map((app) => {
                     const catInfo = getCategoryInfo(app.primary_category);
-                    const isBrowser = /^(msedge|chrome|firefox|brave|opera|vivaldi|arc|safari)/i.test(
-                      app.app_name
-                    );
+                    const isBrowser = BROWSER_APP_RE.test(app.app_name);
                     const isExpanded = expandedApp === app.app_name;
                     return (
                       <div key={app.app_name} className="app-row-container">

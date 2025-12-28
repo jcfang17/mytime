@@ -9,7 +9,10 @@ mod storage;
 mod tracker;
 mod utils;
 
-use models::{AiSuggestion, AppSummary, ClassificationRule, ContextSummary, Label, LabelSource, MatchType, RuleSource, SuggestionStatus, TrackingState};
+use models::{
+    AiSuggestion, AppSummary, ClassificationRule, ContextSummary, Label, LabelSource, MatchType,
+    RuleSource, SelectedBreakdownRow, SuggestionStatus, TrackingState,
+};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use storage::{SqliteStorage, StorageAdapter};
@@ -217,6 +220,30 @@ fn get_app_contexts(
     state
         .storage
         .get_app_contexts(&app_name, start_ms, end_ms)
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+fn get_selected_breakdown(
+    state: State<AppState>,
+    day_offset: i32,
+    categories: Vec<String>,
+) -> Result<Vec<SelectedBreakdownRow>, String> {
+    let day_start_hour = state
+        .storage
+        .get_day_start_hour()
+        .unwrap_or(utils::DEFAULT_DAY_START_HOUR);
+    let (start_ms, end_ms) = utils::day_range_ms_with_offset(day_start_hour, day_offset);
+
+    let end_ms = if day_offset == 0 {
+        utils::now_ms()
+    } else {
+        end_ms
+    };
+
+    state
+        .storage
+        .get_selected_breakdown(start_ms, end_ms, &categories)
         .map_err(|e| e.to_string())
 }
 
@@ -782,6 +809,7 @@ pub fn run() {
             get_app_breakdown,
             get_category_breakdown,
             get_app_contexts,
+            get_selected_breakdown,
             set_app_category,
             get_day_label,
             get_day_start_hour,

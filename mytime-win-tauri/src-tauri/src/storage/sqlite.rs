@@ -2,12 +2,13 @@
 
 use crate::models::{
     AiSuggestion, AppSummary, BootstrapConfig, ClassificationRule, ContextSummary, DailySummary,
-    DataLocation, Label, LabelSource, MatchType, RuleSource, Segment, SuggestionStatus,
+    DataLocation, Label, LabelSource, MatchType, RuleSource, Segment, SelectedBreakdownRow,
+    SuggestionStatus,
 };
 use crate::storage::{StorageAdapter, StorageResult};
 use crate::utils;
 use rusqlite::{params, Connection, OptionalExtension};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::path::PathBuf;
 use std::sync::Mutex;
@@ -720,6 +721,125 @@ impl StorageAdapter for SqliteStorage {
         contexts.sort_by(|a, b| b.total_duration_ms.cmp(&a.total_duration_ms));
 
         Ok(contexts)
+    }
+
+    fn get_selected_breakdown(
+        &self,
+        start_ms: i64,
+        end_ms: i64,
+        categories: &[String],
+    ) -> StorageResult<Vec<SelectedBreakdownRow>> {
+        let conn = self.conn.lock().map_err(|e| e.to_string())?;
+
+        let wanted: HashSet<String> = categories.iter().map(|c| c.to_lowercase()).collect();
+        if wanted.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        // Fetch segments with their best category label (manual > user > ai > heuristic).
+        let mut stmt = conn.prepare(
+            r#"
+            WITH best_labels AS (
+                SELECT title_hash, category,
+                       ROW_NUMBER() OVER (
+                           PARTITION BY title_hash
+                           ORDER BY CASE source
+                               WHEN 'manual' THEN 0
+                               WHEN 'user' THEN 1
+                               WHEN 'ai' THEN 2
+                               WHEN 'heuristic' THEN 3
+                               ELSE 4
+                           END
+                       ) as rn
+                FROM labels
+            )
+            SELECT s.app_name,
+                   s.window_title,
+                   (s.end_time - s.start_time) as duration_ms,
+                   (s.idle_seconds * 1000) as idle_ms,
+                   COALESCE(bl.category, 'unknown') as category
+            FROM segments s
+            LEFT JOIN best_labels bl ON bl.title_hash = s.title_hash AND bl.rn = 1
+            WHERE s.start_time >= ?1 AND s.start_time < ?2
+            "#,
+        )?;
+
+        #[derive(Debug, Clone, PartialEq, Eq, Hash)]
+        struct GroupKey {
+            app_name: String,
+            context: Option<String>,
+            category: String,
+        }
+
+        #[derive(Debug, Clone)]
+        struct GroupData {
+            total_duration_ms: i64,
+            idle_duration_ms: i64,
+            segment_count: u32,
+        }
+
+        let mut groups: HashMap<GroupKey, GroupData> = HashMap::new();
+
+        let rows = stmt.query_map(params![start_ms, end_ms], |row| {
+            let app_name: String = row.get(0)?;
+            let window_title: Option<String> = row.get(1)?;
+            let duration_ms: i64 = row.get(2)?;
+            let idle_ms: i64 = row.get::<_, Option<i64>>(3)?.unwrap_or(0);
+            let category: String = row.get(4)?;
+            Ok((app_name, window_title, duration_ms, idle_ms, category))
+        })?;
+
+        for row in rows {
+            let (app_name, window_title, duration_ms, idle_ms, category) = row?;
+            let category = category.to_lowercase();
+
+            if !wanted.contains(&category) {
+                continue;
+            }
+
+            let title_str = window_title.as_deref().unwrap_or("");
+            let is_browser = utils::is_browser(&app_name);
+            let context = if is_browser {
+                Some(
+                    utils::extract_context(&app_name, title_str)
+                        .unwrap_or_else(|| "other".to_string()),
+                )
+            } else {
+                None
+            };
+
+            let key = GroupKey {
+                app_name,
+                context,
+                category,
+            };
+
+            let entry = groups.entry(key).or_insert(GroupData {
+                total_duration_ms: 0,
+                idle_duration_ms: 0,
+                segment_count: 0,
+            });
+
+            entry.total_duration_ms += duration_ms;
+            entry.idle_duration_ms += idle_ms;
+            entry.segment_count += 1;
+        }
+
+        let mut out: Vec<SelectedBreakdownRow> = groups
+            .into_iter()
+            .map(|(key, data)| SelectedBreakdownRow {
+                friendly_name: utils::to_friendly_name(&key.app_name),
+                app_name: key.app_name,
+                context: key.context,
+                category: key.category,
+                total_duration_ms: data.total_duration_ms,
+                idle_duration_ms: data.idle_duration_ms,
+                segment_count: data.segment_count,
+            })
+            .collect();
+
+        out.sort_by(|a, b| b.total_duration_ms.cmp(&a.total_duration_ms));
+        Ok(out)
     }
 
     fn get_today_active_ms(&self) -> StorageResult<i64> {

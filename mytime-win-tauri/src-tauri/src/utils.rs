@@ -273,19 +273,36 @@ pub fn extract_browser_context(window_title: &str) -> Option<String> {
 
 /// Check if a string looks like a valid site/context name
 fn is_valid_context(s: &str) -> bool {
+    fn normalize_for_compare(s: &str) -> String {
+        // Some apps insert invisible separators (notably Edge can include U+200B).
+        // Remove common zero-width characters and collapse whitespace so browser-name
+        // detection is stable.
+        let cleaned: String = s
+            .chars()
+            .filter(|c| !matches!(*c, '\u{200b}' | '\u{200c}' | '\u{200d}' | '\u{feff}'))
+            .collect();
+        cleaned
+            .to_lowercase()
+            .split_whitespace()
+            .collect::<Vec<_>>()
+            .join(" ")
+    }
+
+    let lower = normalize_for_compare(s);
+
     // Must have some content
-    if s.is_empty() || s.len() < 2 {
+    if lower.is_empty() || lower.len() < 2 {
         return false;
     }
     // Reject if too long (probably not a site name)
-    if s.len() > 50 {
+    if lower.len() > 50 {
         return false;
     }
-    let lower = s.to_lowercase();
 
     // Reject common non-site strings (partial match)
     let reject_patterns = [
         "untitled", "new tab", "loading", "and more",
+        "more page",
         "search results", "google search", "bing search",
     ];
     if reject_patterns.iter().any(|p| lower.contains(p)) {
@@ -324,8 +341,17 @@ fn is_valid_context(s: &str) -> bool {
 
 /// Normalize a context string for consistent storage/comparison
 fn normalize_context(s: &str) -> String {
-    s.to_lowercase()
-        .trim()
+    // Match the same normalization as is_valid_context.
+    let cleaned: String = s
+        .chars()
+        .filter(|c| !matches!(*c, '\u{200b}' | '\u{200c}' | '\u{200d}' | '\u{feff}'))
+        .collect();
+
+    cleaned
+        .to_lowercase()
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
         // Remove common suffixes
         .trim_end_matches(" - google chrome")
         .trim_end_matches(" - microsoft edge")
@@ -364,6 +390,7 @@ fn extract_domain_from_title(title: &str) -> Option<String> {
         ("outlook", "outlook"),
         ("overleaf", "overleaf"),
         ("chatgpt", "chatgpt"),
+        ("grok", "grok"),
         ("claude", "claude"),
         ("linkedin", "linkedin"),
         ("facebook", "facebook"),
@@ -480,6 +507,10 @@ mod tests {
 
         // Browser names should be rejected as contexts
         assert_eq!(extract_browser_context("New Tab - Microsoft Edge"), None);
+        assert_eq!(
+            extract_browser_context("New Tab - Microsoft\u{200b} Edge"),
+            None
+        );
         assert_eq!(extract_browser_context("Settings - Google Chrome"), None);
         assert_eq!(extract_browser_context("Microsoft Edge"), None);
 
@@ -495,8 +526,28 @@ mod tests {
             Some("github".to_string())
         );
         assert_eq!(
+            extract_browser_context(
+                "anthropics/claude-code - GitHub - Personal - Microsoft\u{200b} Edge"
+            ),
+            Some("github".to_string())
+        );
+        assert_eq!(
             extract_browser_context("YouTube - Work - Google Chrome"),
             Some("youtube".to_string())
+        );
+
+        // Edge multi-tab titles: don't treat "and N more pages" as the site.
+        assert_eq!(
+            extract_browser_context(
+                "ChatGPT - AI4PS and 6 more pages - Personal - Microsoft\u{200b} Edge"
+            ),
+            Some("chatgpt".to_string())
+        );
+        assert_eq!(
+            extract_browser_context(
+                "Efficient Token Reduction in Vision Transformers - Grok and 6 more pages - Personal - Microsoft\u{200b} Edge"
+            ),
+            Some("grok".to_string())
         );
 
         // Browser name with profile suffix should be rejected
