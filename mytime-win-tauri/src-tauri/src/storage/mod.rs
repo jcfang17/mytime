@@ -6,7 +6,7 @@ mod sqlite;
 
 pub use sqlite::SqliteStorage;
 
-use crate::models::{AiSuggestion, AppSummary, ClassificationRule, ContextSummary, DailyDigest, DailySummary, Label, LabelProvenance, Segment, TimelineSegment, UnknownQueueItem};
+use crate::models::{AiSuggestion, AppSummary, ClassificationRule, ContextSummary, DailyDigest, Label, LabelProvenance, Segment, TimelineSegment, UnknownQueueItem};
 use crate::models::SelectedBreakdownRow;
 use std::error::Error;
 
@@ -23,24 +23,15 @@ pub trait StorageAdapter: Send + Sync {
     /// Get segments within a time range
     fn get_segments_range(&self, start_ms: i64, end_ms: i64) -> StorageResult<Vec<Segment>>;
 
-    /// Get segments by focus session ID
-    fn get_segments_by_focus_session(&self, focus_session_id: &str) -> StorageResult<Vec<Segment>>;
-
     // === Labels ===
 
     /// Get label for a title_hash (returns highest priority: user > ai > heuristic)
     fn get_label(&self, title_hash: &str) -> StorageResult<Option<Label>>;
 
-    /// Get all labels for a title_hash (all sources)
-    fn get_labels(&self, title_hash: &str) -> StorageResult<Vec<Label>>;
-
     /// Insert or update a label
     fn upsert_label(&self, label: &Label) -> StorageResult<()>;
 
     // === Derived Queries ===
-
-    /// Get summary for a specific date
-    fn get_daily_summary(&self, date: &str) -> StorageResult<DailySummary>;
 
     /// Get app breakdown for a time range
     fn get_app_breakdown(&self, start_ms: i64, end_ms: i64) -> StorageResult<Vec<AppSummary>>;
@@ -145,14 +136,8 @@ pub trait StorageAdapter: Send + Sync {
         status: crate::models::SuggestionStatus,
     ) -> StorageResult<()>;
 
-    /// Delete old/expired suggestions
-    fn cleanup_old_suggestions(&self, max_age_days: u32) -> StorageResult<u32>;
-
     // === Maintenance ===
 
     /// Run pending migrations
     fn run_migrations(&self) -> StorageResult<()>;
-
-    /// Get current schema version
-    fn get_schema_version(&self) -> StorageResult<i32>;
 }

@@ -160,11 +160,6 @@ pub fn today_start_ms_with_hour(day_start_hour: u32) -> i64 {
     naive_local_to_ms(start_of_day)
 }
 
-/// Get start of today using default day start hour (6 AM)
-pub fn today_start_ms() -> i64 {
-    today_start_ms_with_hour(DEFAULT_DAY_START_HOUR)
-}
-
 /// Get start and end time for a day with offset from today
 /// offset: 0 = today, -1 = yesterday, -2 = two days ago, etc.
 /// Returns (start_ms, end_ms) tuple

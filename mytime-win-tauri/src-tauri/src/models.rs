@@ -28,10 +28,6 @@ impl Segment {
     pub fn duration_seconds(&self) -> u64 {
         ((self.end_time - self.start_time) / 1000) as u64
     }
-
-    pub fn duration_ms(&self) -> i64 {
-        self.end_time - self.start_time
-    }
 }
 
 /// A label associates a category with a title_hash.
@@ -94,16 +90,6 @@ impl Category {
             Category::Productivity => "productivity",
             Category::Communication => "communication",
             Category::Unknown => "unknown",
-        }
-    }
-
-    pub fn from_str(s: &str) -> Self {
-        match s {
-            "entertainment" => Category::Entertainment,
-            "development" => Category::Development,
-            "productivity" => Category::Productivity,
-            "communication" => Category::Communication,
-            _ => Category::Unknown,
         }
     }
 }
@@ -224,16 +210,6 @@ pub struct DigestIdleEntry {
     pub duration_ms: i64,
 }
 
-/// Daily summary (derived from segments)
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
-pub struct DailySummary {
-    pub date: String,                        // YYYY-MM-DD
-    pub total_duration_ms: i64,              // Total segment duration
-    pub total_idle_ms: i64,                  // Idle time (subset of total)
-    pub app_summaries: Vec<AppSummary>,
-    pub category_breakdown: Vec<(String, i64)>, // (category, duration_ms)
-}
-
 /// Bootstrap configuration - stored in bootstrap.json next to exe
 /// Only contains data_location since it's needed before DB path is known
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -256,13 +232,6 @@ pub enum DataLocation {
     AppData,  // Store in %APPDATA%\MyTime\
 }
 
-/// Schema migration record
-#[derive(Debug, Clone)]
-pub struct Migration {
-    pub version: i32,
-    pub applied_at: i64,
-}
-
 /// Tracking state sent to frontend
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TrackingState {
@@ -270,19 +239,6 @@ pub struct TrackingState {
     pub session_start_ms: Option<i64>,
     pub total_time_ms: i64,     // Live total from DB
     pub baseline_ms: Option<i64>, // Total at session start (for avoiding double-count)
-}
-
-/// Old CSV format for import/export compatibility
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct LegacyTimeEntry {
-    pub app_name: String,
-    pub window_title: String,
-    pub start_time: String, // ISO8601
-    pub end_time: String,   // ISO8601
-    pub duration_seconds: u64,
-    pub idle_seconds: u64,
-    pub keystrokes: u64,
-    pub mouse_clicks: u64,
 }
 
 // === Classification Rules ===
@@ -345,14 +301,6 @@ impl RuleSource {
         }
     }
 
-    /// Priority for rule ordering (higher = wins)
-    pub fn priority(&self) -> i32 {
-        match self {
-            RuleSource::User => 100,
-            RuleSource::AiApproved => 50,
-            RuleSource::Builtin => 0,
-        }
-    }
 }
 
 /// A classification rule for categorizing windows
@@ -372,11 +320,6 @@ pub struct ClassificationRule {
 }
 
 impl ClassificationRule {
-    /// Compute effective priority (source priority + custom priority)
-    pub fn effective_priority(&self) -> i32 {
-        self.source.priority() + self.priority
-    }
-
     /// Check if this rule matches the given app name and window title
     pub fn matches(&self, app_name: &str, window_title: &str) -> bool {
         let app_lower = app_name.to_lowercase();
@@ -415,14 +358,6 @@ impl ClassificationRule {
             }
         }
     }
-}
-
-/// Result of rule matching - category and optional tags
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct RuleMatch {
-    pub rule_id: String,
-    pub category: String,
-    pub tags: Option<Vec<String>>,
 }
 
 // === AI Suggestions ===

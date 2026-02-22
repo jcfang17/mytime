@@ -2,7 +2,7 @@
 
 use crate::models::{
     AiSuggestion, AppSummary, BootstrapConfig, ClassificationRule, ContextSummary, DailyDigest,
-    DailySummary, DataLocation, DigestAppEntry, DigestCategoryEntry, DigestFocusBlock,
+    DataLocation, DigestAppEntry, DigestCategoryEntry, DigestFocusBlock,
     DigestIdleEntry, Label, LabelProvenance, LabelSource, MatchType, RuleSource, Segment,
     SelectedBreakdownRow, SuggestionStatus, TimelineSegment, UnknownQueueItem,
 };
@@ -17,7 +17,6 @@ use std::sync::Mutex;
 /// SQLite storage implementation
 pub struct SqliteStorage {
     conn: Mutex<Connection>,
-    data_dir: PathBuf,
 }
 
 impl SqliteStorage {
@@ -41,7 +40,6 @@ impl SqliteStorage {
 
         let storage = Self {
             conn: Mutex::new(conn),
-            data_dir,
         };
 
         // Run migrations
@@ -98,11 +96,6 @@ impl SqliteStorage {
         };
 
         Ok(data_dir)
-    }
-
-    /// Get the data directory path
-    pub fn data_dir(&self) -> &PathBuf {
-        &self.data_dir
     }
 
     /// Ensure device_id exists in config
@@ -317,43 +310,6 @@ impl StorageAdapter for SqliteStorage {
         Ok(segments)
     }
 
-    fn get_segments_by_focus_session(&self, focus_session_id: &str) -> StorageResult<Vec<Segment>> {
-        let conn = self.conn.lock().map_err(|e| e.to_string())?;
-
-        let mut stmt = conn.prepare(
-            r#"
-            SELECT segment_id, app_name, window_title, title_hash,
-                   start_time, end_time, idle_seconds, keystrokes, mouse_clicks,
-                   focus_session_id, device_id, schema_version, created_at
-            FROM segments
-            WHERE focus_session_id = ?1
-            ORDER BY start_time ASC
-            "#,
-        )?;
-
-        let segments = stmt
-            .query_map(params![focus_session_id], |row| {
-                Ok(Segment {
-                    segment_id: row.get(0)?,
-                    app_name: row.get(1)?,
-                    window_title: row.get(2)?,
-                    title_hash: row.get(3)?,
-                    start_time: row.get(4)?,
-                    end_time: row.get(5)?,
-                    idle_seconds: row.get(6)?,
-                    keystrokes: row.get(7)?,
-                    mouse_clicks: row.get(8)?,
-                    focus_session_id: row.get(9)?,
-                    device_id: row.get(10)?,
-                    schema_version: row.get(11)?,
-                    created_at: row.get(12)?,
-                })
-            })?
-            .collect::<Result<Vec<_>, _>>()?;
-
-        Ok(segments)
-    }
-
     fn get_label(&self, title_hash: &str) -> StorageResult<Option<Label>> {
         let conn = self.conn.lock().map_err(|e| e.to_string())?;
 
@@ -391,33 +347,6 @@ impl StorageAdapter for SqliteStorage {
         Ok(label)
     }
 
-    fn get_labels(&self, title_hash: &str) -> StorageResult<Vec<Label>> {
-        let conn = self.conn.lock().map_err(|e| e.to_string())?;
-
-        let mut stmt = conn.prepare(
-            r#"
-            SELECT title_hash, category, source, confidence, updated_at
-            FROM labels
-            WHERE title_hash = ?1
-            "#,
-        )?;
-
-        let labels = stmt
-            .query_map(params![title_hash], |row| {
-                let source_str: String = row.get(2)?;
-                Ok(Label {
-                    title_hash: row.get(0)?,
-                    category: row.get(1)?,
-                    source: LabelSource::from_str(&source_str).unwrap_or(LabelSource::Heuristic),
-                    confidence: row.get(3)?,
-                    updated_at: row.get(4)?,
-                })
-            })?
-            .collect::<Result<Vec<_>, _>>()?;
-
-        Ok(labels)
-    }
-
     fn upsert_label(&self, label: &Label) -> StorageResult<()> {
         let conn = self.conn.lock().map_err(|e| e.to_string())?;
 
@@ -440,44 +369,6 @@ impl StorageAdapter for SqliteStorage {
         )?;
 
         Ok(())
-    }
-
-    fn get_daily_summary(&self, date: &str) -> StorageResult<DailySummary> {
-        // Get configured day start hour
-        let day_start_hour = self.get_day_start_hour()?;
-
-        // Parse date to get start/end timestamps using configured day start hour
-        let parsed_date =
-            chrono::NaiveDate::parse_from_str(date, "%Y-%m-%d").map_err(|e| e.to_string())?;
-        let start_of_day = parsed_date.and_hms_opt(day_start_hour, 0, 0).unwrap();
-        let end_of_day = (parsed_date + chrono::Duration::days(1))
-            .and_hms_opt(day_start_hour, 0, 0)
-            .unwrap();
-
-        let start_ms = utils::naive_local_to_ms(start_of_day);
-        let end_ms = utils::naive_local_to_ms(end_of_day);
-
-        let app_summaries = self.get_app_breakdown(start_ms, end_ms)?;
-
-        let total_duration_ms: i64 = app_summaries.iter().map(|s| s.total_duration_ms).sum();
-        let total_idle_ms: i64 = app_summaries.iter().map(|s| s.idle_duration_ms).sum();
-
-        // Calculate category breakdown
-        let mut category_totals: HashMap<String, i64> = HashMap::new();
-        for summary in &app_summaries {
-            if let Some(cat) = &summary.primary_category {
-                *category_totals.entry(cat.clone()).or_default() += summary.total_duration_ms;
-            }
-        }
-        let category_breakdown: Vec<(String, i64)> = category_totals.into_iter().collect();
-
-        Ok(DailySummary {
-            date: date.to_string(),
-            total_duration_ms,
-            total_idle_ms,
-            app_summaries,
-            category_breakdown,
-        })
     }
 
     fn get_app_breakdown(&self, start_ms: i64, end_ms: i64) -> StorageResult<Vec<AppSummary>> {
@@ -1669,20 +1560,6 @@ impl StorageAdapter for SqliteStorage {
         Ok(())
     }
 
-    fn cleanup_old_suggestions(&self, max_age_days: u32) -> StorageResult<u32> {
-        let conn = self.conn.lock().map_err(|e| e.to_string())?;
-
-        let cutoff_ms = chrono::Utc::now().timestamp_millis()
-            - (max_age_days as i64 * 24 * 60 * 60 * 1000);
-
-        let deleted = conn.execute(
-            "DELETE FROM ai_suggestions WHERE created_at < ?1 AND status IN ('rejected', 'expired')",
-            params![cutoff_ms],
-        )?;
-
-        Ok(deleted as u32)
-    }
-
     fn run_migrations(&self) -> StorageResult<()> {
         let conn = self.conn.lock().map_err(|e| e.to_string())?;
 
@@ -1738,17 +1615,4 @@ impl StorageAdapter for SqliteStorage {
         Ok(())
     }
 
-    fn get_schema_version(&self) -> StorageResult<i32> {
-        let conn = self.conn.lock().map_err(|e| e.to_string())?;
-
-        let version: i32 = conn
-            .query_row(
-                "SELECT COALESCE(MAX(version), 0) FROM schema_migrations",
-                [],
-                |row| row.get(0),
-            )
-            .unwrap_or(0);
-
-        Ok(version)
-    }
 }
