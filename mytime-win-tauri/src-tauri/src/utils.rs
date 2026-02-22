@@ -121,6 +121,22 @@ pub fn now_ms() -> i64 {
     chrono::Utc::now().timestamp_millis()
 }
 
+/// Convert a NaiveDateTime (interpreted as local time) to UTC milliseconds timestamp.
+/// Handles DST ambiguity (picks earlier time) and spring-forward gaps (shifts forward by 1 hour).
+pub fn naive_local_to_ms(ndt: chrono::NaiveDateTime) -> i64 {
+    ndt.and_local_timezone(chrono::Local)
+        .earliest()
+        .unwrap_or_else(|| {
+            // This local time doesn't exist (spring-forward gap).
+            // Shift forward by 1 hour to get past the gap.
+            (ndt + chrono::Duration::hours(1))
+                .and_local_timezone(chrono::Local)
+                .earliest()
+                .expect("shifted time should be valid")
+        })
+        .timestamp_millis()
+}
+
 /// Default day start hour (6 AM) - day begins at 6 AM, not midnight
 pub const DEFAULT_DAY_START_HOUR: u32 = 6;
 
@@ -141,12 +157,7 @@ pub fn today_start_ms_with_hour(day_start_hour: u32) -> i64 {
     let start_of_day = effective_date
         .and_hms_opt(day_start_hour, 0, 0)
         .unwrap();
-    let local_offset = *now.offset();
-    let start_dt = chrono::DateTime::<chrono::Local>::from_naive_utc_and_offset(
-        start_of_day - local_offset,
-        local_offset,
-    );
-    start_dt.timestamp_millis()
+    naive_local_to_ms(start_of_day)
 }
 
 /// Get start of today using default day start hour (6 AM)
@@ -176,28 +187,24 @@ pub fn day_range_ms_with_offset(day_start_hour: u32, offset: i32) -> (i64, i64) 
         .and_hms_opt(day_start_hour, 0, 0)
         .unwrap();
 
-    let local_offset = *now.offset();
-    let start_dt = chrono::DateTime::<chrono::Local>::from_naive_utc_and_offset(
-        start_of_day - local_offset,
-        local_offset,
-    );
-    let end_dt = chrono::DateTime::<chrono::Local>::from_naive_utc_and_offset(
-        end_of_day - local_offset,
-        local_offset,
-    );
-
-    (start_dt.timestamp_millis(), end_dt.timestamp_millis())
+    (naive_local_to_ms(start_of_day), naive_local_to_ms(end_of_day))
 }
 
 /// Format a date for display based on day offset
 /// Returns "Today", "Yesterday", or date like "Dec 11"
-pub fn format_day_label(offset: i32) -> String {
+pub fn format_day_label(day_start_hour: u32, offset: i32) -> String {
     match offset {
         0 => "Today".to_string(),
         -1 => "Yesterday".to_string(),
         _ => {
             let now = chrono::Local::now();
-            let target = now.date_naive() + chrono::Duration::days(offset as i64);
+            let today = now.date_naive();
+            let effective_today = if now.hour() < day_start_hour {
+                today - chrono::Duration::days(1)
+            } else {
+                today
+            };
+            let target = effective_today + chrono::Duration::days(offset as i64);
             target.format("%b %d").to_string()
         }
     }

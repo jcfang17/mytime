@@ -147,6 +147,83 @@ pub struct SelectedBreakdownRow {
     pub segment_count: u32,
 }
 
+/// A segment in the timeline view, with category and friendly name
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TimelineSegment {
+    pub segment_id: String,
+    pub app_name: String,
+    pub friendly_name: String,
+    pub window_title: Option<String>,
+    pub title_hash: String,
+    pub start_time: i64,
+    pub end_time: i64,
+    pub category: String,
+    pub idle_seconds: u64,
+}
+
+/// Label provenance: explains why a segment has a particular category
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct LabelProvenance {
+    pub best_label: Option<Label>,
+    pub matching_rule: Option<ClassificationRule>,
+}
+
+/// An item in the unknown cleanup queue (uncategorized activity grouped by app+context)
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct UnknownQueueItem {
+    pub app_name: String,
+    pub friendly_name: String,
+    pub context: Option<String>,
+    pub total_duration_ms: i64,
+    pub idle_duration_ms: i64,
+    pub segment_count: u32,
+    pub sample_titles: Vec<String>,
+}
+
+/// Daily digest statistics
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DailyDigest {
+    pub total_tracked_ms: i64,
+    pub total_active_ms: i64,
+    pub top_categories: Vec<DigestCategoryEntry>,
+    pub top_apps: Vec<DigestAppEntry>,
+    pub longest_focus: Option<DigestFocusBlock>,
+    pub most_idle: Option<DigestIdleEntry>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DigestCategoryEntry {
+    pub category: String,
+    pub duration_ms: i64,
+    pub idle_ms: i64,
+    pub percentage: f64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DigestAppEntry {
+    pub app_name: String,
+    pub friendly_name: String,
+    pub duration_ms: i64,
+    pub idle_ms: i64,
+    pub category: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DigestFocusBlock {
+    pub app_name: String,
+    pub friendly_name: String,
+    pub duration_ms: i64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DigestIdleEntry {
+    pub app_name: String,
+    pub friendly_name: String,
+    pub window_title: String,
+    pub idle_seconds: u64,
+    pub duration_ms: i64,
+}
+
 /// Daily summary (derived from segments)
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct DailySummary {

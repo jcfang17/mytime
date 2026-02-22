@@ -6,7 +6,7 @@ mod sqlite;
 
 pub use sqlite::SqliteStorage;
 
-use crate::models::{AiSuggestion, AppSummary, ClassificationRule, ContextSummary, DailySummary, Label, Segment};
+use crate::models::{AiSuggestion, AppSummary, ClassificationRule, ContextSummary, DailyDigest, DailySummary, Label, LabelProvenance, Segment, TimelineSegment, UnknownQueueItem};
 use crate::models::SelectedBreakdownRow;
 use std::error::Error;
 
@@ -77,8 +77,20 @@ pub trait StorageAdapter: Send + Sync {
         categories: &[String],
     ) -> StorageResult<Vec<SelectedBreakdownRow>>;
 
-    /// Get today's total active time in milliseconds
-    fn get_today_active_ms(&self) -> StorageResult<i64>;
+    /// Get today's total tracked time in milliseconds (includes idle)
+    fn get_today_total_ms(&self) -> StorageResult<i64>;
+
+    /// Get timeline segments for a day range, each annotated with its best category
+    fn get_timeline_segments(&self, start_ms: i64, end_ms: i64) -> StorageResult<Vec<TimelineSegment>>;
+
+    /// Get unknown-category segments grouped by (app_name, context) for the cleanup queue
+    fn get_unknown_queue(&self, start_ms: i64, end_ms: i64) -> StorageResult<Vec<UnknownQueueItem>>;
+
+    /// Get daily digest statistics for a time range
+    fn get_daily_digest(&self, start_ms: i64, end_ms: i64) -> StorageResult<DailyDigest>;
+
+    /// Get label provenance for a title_hash (explains why it has a particular category)
+    fn get_label_provenance(&self, title_hash: &str) -> StorageResult<LabelProvenance>;
 
     // === Config ===
 

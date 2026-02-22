@@ -1,9 +1,10 @@
 //! SQLite storage implementation for MyTime
 
 use crate::models::{
-    AiSuggestion, AppSummary, BootstrapConfig, ClassificationRule, ContextSummary, DailySummary,
-    DataLocation, Label, LabelSource, MatchType, RuleSource, Segment, SelectedBreakdownRow,
-    SuggestionStatus,
+    AiSuggestion, AppSummary, BootstrapConfig, ClassificationRule, ContextSummary, DailyDigest,
+    DailySummary, DataLocation, DigestAppEntry, DigestCategoryEntry, DigestFocusBlock,
+    DigestIdleEntry, Label, LabelProvenance, LabelSource, MatchType, RuleSource, Segment,
+    SelectedBreakdownRow, SuggestionStatus, TimelineSegment, UnknownQueueItem,
 };
 use crate::storage::{StorageAdapter, StorageResult};
 use crate::utils;
@@ -288,7 +289,7 @@ impl StorageAdapter for SqliteStorage {
                    start_time, end_time, idle_seconds, keystrokes, mouse_clicks,
                    focus_session_id, device_id, schema_version, created_at
             FROM segments
-            WHERE start_time >= ?1 AND start_time < ?2
+            WHERE start_time < ?2 AND end_time > ?1
             ORDER BY start_time ASC
             "#,
         )?;
@@ -449,16 +450,12 @@ impl StorageAdapter for SqliteStorage {
         let parsed_date =
             chrono::NaiveDate::parse_from_str(date, "%Y-%m-%d").map_err(|e| e.to_string())?;
         let start_of_day = parsed_date.and_hms_opt(day_start_hour, 0, 0).unwrap();
+        let end_of_day = (parsed_date + chrono::Duration::days(1))
+            .and_hms_opt(day_start_hour, 0, 0)
+            .unwrap();
 
-        let local_offset = *chrono::Local::now().offset();
-        let start_dt = chrono::DateTime::<chrono::Local>::from_naive_utc_and_offset(
-            start_of_day - local_offset,
-            local_offset,
-        );
-        let end_dt = start_dt + chrono::Duration::days(1);
-
-        let start_ms = start_dt.timestamp_millis();
-        let end_ms = end_dt.timestamp_millis();
+        let start_ms = utils::naive_local_to_ms(start_of_day);
+        let end_ms = utils::naive_local_to_ms(end_of_day);
 
         let app_summaries = self.get_app_breakdown(start_ms, end_ms)?;
 
@@ -487,17 +484,21 @@ impl StorageAdapter for SqliteStorage {
         let conn = self.conn.lock().map_err(|e| e.to_string())?;
 
         // First, get basic app stats
+        // Use overlap-aware filtering: include segments that cross day boundaries
+        // and clamp durations to the query window [start_ms, end_ms).
         let mut stmt = conn.prepare(
             r#"
             SELECT
                 s.app_name,
-                SUM(s.end_time - s.start_time) as total_duration_ms,
-                SUM(s.idle_seconds * 1000) as total_idle_ms,
+                SUM(MIN(s.end_time, ?2) - MAX(s.start_time, ?1)) as total_duration_ms,
+                SUM(CAST(s.idle_seconds * 1000.0
+                    * (MIN(s.end_time, ?2) - MAX(s.start_time, ?1))
+                    / MAX(s.end_time - s.start_time, 1) AS INTEGER)) as total_idle_ms,
                 COUNT(*) as segment_count,
                 SUM(s.keystrokes) as total_keystrokes,
                 SUM(s.mouse_clicks) as total_clicks
             FROM segments s
-            WHERE s.start_time >= ?1 AND s.start_time < ?2
+            WHERE s.start_time < ?2 AND s.end_time > ?1
             GROUP BY s.app_name
             ORDER BY total_duration_ms DESC
             "#,
@@ -537,10 +538,10 @@ impl StorageAdapter for SqliteStorage {
                        ) as rn
                 FROM labels
             )
-            SELECT bl.category, SUM(s.end_time - s.start_time) as cat_duration
+            SELECT bl.category, SUM(MIN(s.end_time, ?2) - MAX(s.start_time, ?1)) as cat_duration
             FROM segments s
             LEFT JOIN best_labels bl ON bl.title_hash = s.title_hash AND bl.rn = 1
-            WHERE s.start_time >= ?1 AND s.start_time < ?2
+            WHERE s.start_time < ?2 AND s.end_time > ?1
               AND s.app_name = ?3
               AND bl.category IS NOT NULL
             GROUP BY bl.category
@@ -588,11 +589,13 @@ impl StorageAdapter for SqliteStorage {
                 FROM labels
             )
             SELECT COALESCE(bl.category, 'unknown') as cat,
-                   SUM(s.end_time - s.start_time) as total_ms,
-                   SUM(s.idle_seconds * 1000) as idle_ms
+                   SUM(MIN(s.end_time, ?2) - MAX(s.start_time, ?1)) as total_ms,
+                   SUM(CAST(s.idle_seconds * 1000.0
+                       * (MIN(s.end_time, ?2) - MAX(s.start_time, ?1))
+                       / MAX(s.end_time - s.start_time, 1) AS INTEGER)) as idle_ms
             FROM segments s
             LEFT JOIN best_labels bl ON bl.title_hash = s.title_hash AND bl.rn = 1
-            WHERE s.start_time >= ?1 AND s.start_time < ?2
+            WHERE s.start_time < ?2 AND s.end_time > ?1
             GROUP BY cat
             ORDER BY total_ms DESC
             "#,
@@ -637,11 +640,15 @@ impl StorageAdapter for SqliteStorage {
                        ) as rn
                 FROM labels
             )
-            SELECT s.window_title, s.title_hash, s.end_time - s.start_time as duration_ms,
-                   s.idle_seconds * 1000 as idle_ms, bl.category
+            SELECT s.window_title, s.title_hash,
+                   MIN(s.end_time, ?3) - MAX(s.start_time, ?2) as duration_ms,
+                   CAST(s.idle_seconds * 1000.0
+                       * (MIN(s.end_time, ?3) - MAX(s.start_time, ?2))
+                       / MAX(s.end_time - s.start_time, 1) AS INTEGER) as idle_ms,
+                   bl.category
             FROM segments s
             LEFT JOIN best_labels bl ON bl.title_hash = s.title_hash AND bl.rn = 1
-            WHERE s.app_name = ?1 AND s.start_time >= ?2 AND s.start_time < ?3
+            WHERE s.app_name = ?1 AND s.start_time < ?3 AND s.end_time > ?2
             ORDER BY s.start_time DESC
             "#,
         )?;
@@ -755,12 +762,14 @@ impl StorageAdapter for SqliteStorage {
             )
             SELECT s.app_name,
                    s.window_title,
-                   (s.end_time - s.start_time) as duration_ms,
-                   (s.idle_seconds * 1000) as idle_ms,
+                   (MIN(s.end_time, ?2) - MAX(s.start_time, ?1)) as duration_ms,
+                   CAST(s.idle_seconds * 1000.0
+                       * (MIN(s.end_time, ?2) - MAX(s.start_time, ?1))
+                       / MAX(s.end_time - s.start_time, 1) AS INTEGER) as idle_ms,
                    COALESCE(bl.category, 'unknown') as category
             FROM segments s
             LEFT JOIN best_labels bl ON bl.title_hash = s.title_hash AND bl.rn = 1
-            WHERE s.start_time >= ?1 AND s.start_time < ?2
+            WHERE s.start_time < ?2 AND s.end_time > ?1
             "#,
         )?;
 
@@ -842,19 +851,384 @@ impl StorageAdapter for SqliteStorage {
         Ok(out)
     }
 
-    fn get_today_active_ms(&self) -> StorageResult<i64> {
+    fn get_today_total_ms(&self) -> StorageResult<i64> {
         let day_start_hour = self.get_day_start_hour()?;
         let start_ms = utils::today_start_ms_with_hour(day_start_hour);
 
         let conn = self.conn.lock().map_err(|e| e.to_string())?;
 
+        // Include segments that overlap today's boundary and clamp their start
         let total: i64 = conn.query_row(
-            "SELECT COALESCE(SUM(end_time - start_time), 0) FROM segments WHERE start_time >= ?1",
+            "SELECT COALESCE(SUM(end_time - MAX(start_time, ?1)), 0) FROM segments WHERE end_time > ?1",
             params![start_ms],
             |row| row.get(0),
         )?;
 
         Ok(total)
+    }
+
+    fn get_timeline_segments(&self, start_ms: i64, end_ms: i64) -> StorageResult<Vec<TimelineSegment>> {
+        let conn = self.conn.lock().map_err(|e| e.to_string())?;
+
+        let mut stmt = conn.prepare(
+            r#"
+            WITH best_labels AS (
+                SELECT title_hash, category,
+                       ROW_NUMBER() OVER (
+                           PARTITION BY title_hash
+                           ORDER BY CASE source
+                               WHEN 'manual' THEN 0
+                               WHEN 'user' THEN 1
+                               WHEN 'ai' THEN 2
+                               WHEN 'heuristic' THEN 3
+                               ELSE 4
+                           END
+                       ) as rn
+                FROM labels
+            )
+            SELECT s.segment_id, s.app_name, s.window_title, s.title_hash,
+                   MAX(s.start_time, ?1) as clamped_start,
+                   MIN(s.end_time, ?2) as clamped_end,
+                   COALESCE(bl.category, 'unknown') as category,
+                   CAST(s.idle_seconds
+                       * (MIN(s.end_time, ?2) - MAX(s.start_time, ?1))
+                       / MAX(s.end_time - s.start_time, 1) AS INTEGER) as clamped_idle
+            FROM segments s
+            LEFT JOIN best_labels bl ON bl.title_hash = s.title_hash AND bl.rn = 1
+            WHERE s.start_time < ?2 AND s.end_time > ?1
+            ORDER BY clamped_start ASC
+            "#,
+        )?;
+
+        let segments = stmt
+            .query_map(params![start_ms, end_ms], |row| {
+                let app_name: String = row.get(1)?;
+                Ok(TimelineSegment {
+                    segment_id: row.get(0)?,
+                    friendly_name: utils::to_friendly_name(&app_name),
+                    app_name,
+                    window_title: row.get(2)?,
+                    title_hash: row.get(3)?,
+                    start_time: row.get(4)?,
+                    end_time: row.get(5)?,
+                    category: row.get(6)?,
+                    idle_seconds: row.get::<_, i64>(7).unwrap_or(0) as u64,
+                })
+            })?
+            .collect::<Result<Vec<_>, _>>()?;
+
+        Ok(segments)
+    }
+
+    fn get_unknown_queue(&self, start_ms: i64, end_ms: i64) -> StorageResult<Vec<UnknownQueueItem>> {
+        let conn = self.conn.lock().map_err(|e| e.to_string())?;
+
+        let mut stmt = conn.prepare(
+            r#"
+            WITH best_labels AS (
+                SELECT title_hash, category,
+                       ROW_NUMBER() OVER (
+                           PARTITION BY title_hash
+                           ORDER BY CASE source
+                               WHEN 'manual' THEN 0
+                               WHEN 'user' THEN 1
+                               WHEN 'ai' THEN 2
+                               WHEN 'heuristic' THEN 3
+                               ELSE 4
+                           END
+                       ) as rn
+                FROM labels
+            )
+            SELECT s.app_name,
+                   s.window_title,
+                   (MIN(s.end_time, ?2) - MAX(s.start_time, ?1)) as duration_ms,
+                   CAST(s.idle_seconds * 1000.0
+                       * (MIN(s.end_time, ?2) - MAX(s.start_time, ?1))
+                       / MAX(s.end_time - s.start_time, 1) AS INTEGER) as idle_ms
+            FROM segments s
+            LEFT JOIN best_labels bl ON bl.title_hash = s.title_hash AND bl.rn = 1
+            WHERE s.start_time < ?2 AND s.end_time > ?1
+              AND (bl.category IS NULL OR bl.category = 'unknown')
+            ORDER BY duration_ms DESC
+            "#,
+        )?;
+
+        struct QueueData {
+            total_duration_ms: i64,
+            idle_duration_ms: i64,
+            segment_count: u32,
+            sample_titles: Vec<String>,
+        }
+
+        let mut grouped: HashMap<(String, Option<String>), QueueData> = HashMap::new();
+
+        let rows = stmt.query_map(params![start_ms, end_ms], |row| {
+            let app_name: String = row.get(0)?;
+            let title: Option<String> = row.get(1)?;
+            let duration_ms: i64 = row.get(2)?;
+            let idle_ms: i64 = row.get(3)?;
+            Ok((app_name, title, duration_ms, idle_ms))
+        })?;
+
+        for row in rows {
+            let (app_name, title, duration_ms, idle_ms) = row?;
+            let title_str = title.as_deref().unwrap_or("");
+
+            let context = if utils::is_browser(&app_name) {
+                Some(utils::extract_context(&app_name, title_str)
+                    .unwrap_or_else(|| "other".to_string()))
+            } else {
+                None
+            };
+
+            let key = (app_name, context);
+            let entry = grouped.entry(key).or_insert_with(|| QueueData {
+                total_duration_ms: 0,
+                idle_duration_ms: 0,
+                segment_count: 0,
+                sample_titles: Vec::new(),
+            });
+
+            entry.total_duration_ms += duration_ms;
+            entry.idle_duration_ms += idle_ms;
+            entry.segment_count += 1;
+
+            if let Some(ref t) = title {
+                if entry.sample_titles.len() < 3 && !entry.sample_titles.contains(t) {
+                    entry.sample_titles.push(t.clone());
+                }
+            }
+        }
+
+        let mut items: Vec<UnknownQueueItem> = grouped
+            .into_iter()
+            .filter(|(_, data)| data.total_duration_ms >= 5000)
+            .map(|((app_name, context), data)| UnknownQueueItem {
+                friendly_name: utils::to_friendly_name(&app_name),
+                app_name,
+                context,
+                total_duration_ms: data.total_duration_ms,
+                idle_duration_ms: data.idle_duration_ms,
+                segment_count: data.segment_count,
+                sample_titles: data.sample_titles,
+            })
+            .collect();
+
+        items.sort_by(|a, b| b.total_duration_ms.cmp(&a.total_duration_ms));
+
+        Ok(items)
+    }
+
+    fn get_daily_digest(&self, start_ms: i64, end_ms: i64) -> StorageResult<DailyDigest> {
+        let conn = self.conn.lock().map_err(|e| e.to_string())?;
+
+        // 1. Category breakdown (reuse same CTE pattern)
+        let mut cat_stmt = conn.prepare(
+            r#"
+            WITH best_labels AS (
+                SELECT title_hash, category,
+                       ROW_NUMBER() OVER (
+                           PARTITION BY title_hash
+                           ORDER BY CASE source
+                               WHEN 'manual' THEN 0
+                               WHEN 'user' THEN 1
+                               WHEN 'ai' THEN 2
+                               WHEN 'heuristic' THEN 3
+                               ELSE 4
+                           END
+                       ) as rn
+                FROM labels
+            )
+            SELECT COALESCE(bl.category, 'unknown') as category,
+                   SUM(MIN(s.end_time, ?2) - MAX(s.start_time, ?1)) as total_ms,
+                   SUM(CAST(s.idle_seconds * 1000.0
+                       * (MIN(s.end_time, ?2) - MAX(s.start_time, ?1))
+                       / MAX(s.end_time - s.start_time, 1) AS INTEGER)) as idle_ms
+            FROM segments s
+            LEFT JOIN best_labels bl ON bl.title_hash = s.title_hash AND bl.rn = 1
+            WHERE s.start_time < ?2 AND s.end_time > ?1
+            GROUP BY COALESCE(bl.category, 'unknown')
+            ORDER BY total_ms DESC
+            "#,
+        )?;
+
+        let cat_rows = cat_stmt.query_map(params![start_ms, end_ms], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?, row.get::<_, i64>(2)?))
+        })?;
+
+        let mut total_tracked_ms: i64 = 0;
+        let mut total_idle_ms: i64 = 0;
+        let mut all_categories: Vec<(String, i64, i64)> = Vec::new(); // (cat, total_ms, idle_ms)
+
+        for row in cat_rows {
+            let (cat, total_ms, idle_ms) = row?;
+            total_tracked_ms += total_ms;
+            total_idle_ms += idle_ms;
+            all_categories.push((cat, total_ms, idle_ms));
+        }
+
+        let top_categories: Vec<DigestCategoryEntry> = all_categories
+            .iter()
+            .take(3)
+            .map(|(cat, ms, idle)| DigestCategoryEntry {
+                category: cat.clone(),
+                duration_ms: *ms,
+                idle_ms: *idle,
+                percentage: if total_tracked_ms > 0 {
+                    (*ms as f64 / total_tracked_ms as f64) * 100.0
+                } else {
+                    0.0
+                },
+            })
+            .collect();
+
+        // 2. Top 5 apps by duration
+        let mut app_stmt = conn.prepare(
+            r#"
+            WITH best_labels AS (
+                SELECT title_hash, category,
+                       ROW_NUMBER() OVER (
+                           PARTITION BY title_hash
+                           ORDER BY CASE source
+                               WHEN 'manual' THEN 0
+                               WHEN 'user' THEN 1
+                               WHEN 'ai' THEN 2
+                               WHEN 'heuristic' THEN 3
+                               ELSE 4
+                           END
+                       ) as rn
+                FROM labels
+            )
+            SELECT s.app_name,
+                   SUM(MIN(s.end_time, ?2) - MAX(s.start_time, ?1)) as total_ms,
+                   SUM(CAST(s.idle_seconds * 1000.0
+                       * (MIN(s.end_time, ?2) - MAX(s.start_time, ?1))
+                       / MAX(s.end_time - s.start_time, 1) AS INTEGER)) as idle_ms,
+                   (SELECT bl2.category FROM best_labels bl2
+                    WHERE bl2.title_hash = s.title_hash AND bl2.rn = 1
+                    LIMIT 1) as category
+            FROM segments s
+            LEFT JOIN best_labels bl ON bl.title_hash = s.title_hash AND bl.rn = 1
+            WHERE s.start_time < ?2 AND s.end_time > ?1
+            GROUP BY s.app_name
+            ORDER BY total_ms DESC
+            LIMIT 5
+            "#,
+        )?;
+
+        let top_apps: Vec<DigestAppEntry> = app_stmt
+            .query_map(params![start_ms, end_ms], |row| {
+                let app_name: String = row.get(0)?;
+                Ok(DigestAppEntry {
+                    friendly_name: utils::to_friendly_name(&app_name),
+                    app_name,
+                    duration_ms: row.get(1)?,
+                    idle_ms: row.get(2)?,
+                    category: row.get(3)?,
+                })
+            })?
+            .collect::<Result<Vec<_>, _>>()?;
+
+        // 3. Longest focus block (group by focus_session_id, subtract idle)
+        let longest_focus: Option<DigestFocusBlock> = conn
+            .query_row(
+                r#"
+                SELECT s.app_name,
+                       SUM(MIN(s.end_time, ?2) - MAX(s.start_time, ?1))
+                       - SUM(CAST(s.idle_seconds * 1000.0
+                           * (MIN(s.end_time, ?2) - MAX(s.start_time, ?1))
+                           / MAX(s.end_time - s.start_time, 1) AS INTEGER)) as active_ms
+                FROM segments s
+                WHERE s.start_time < ?2 AND s.end_time > ?1
+                GROUP BY s.focus_session_id
+                HAVING active_ms > 0
+                ORDER BY active_ms DESC
+                LIMIT 1
+                "#,
+                params![start_ms, end_ms],
+                |row| {
+                    let app_name: String = row.get(0)?;
+                    Ok(DigestFocusBlock {
+                        friendly_name: utils::to_friendly_name(&app_name),
+                        app_name,
+                        duration_ms: row.get(1)?,
+                    })
+                },
+            )
+            .optional()?;
+
+        // 4. Most idle segment
+        let most_idle: Option<DigestIdleEntry> = conn
+            .query_row(
+                r#"
+                SELECT s.app_name, COALESCE(s.window_title, ''),
+                       s.idle_seconds,
+                       (MIN(s.end_time, ?2) - MAX(s.start_time, ?1)) as duration_ms
+                FROM segments s
+                WHERE s.start_time < ?2 AND s.end_time > ?1
+                  AND s.idle_seconds > 0
+                ORDER BY s.idle_seconds DESC
+                LIMIT 1
+                "#,
+                params![start_ms, end_ms],
+                |row| {
+                    let app_name: String = row.get(0)?;
+                    Ok(DigestIdleEntry {
+                        friendly_name: utils::to_friendly_name(&app_name),
+                        app_name,
+                        window_title: row.get(1)?,
+                        idle_seconds: row.get::<_, i64>(2)? as u64,
+                        duration_ms: row.get(3)?,
+                    })
+                },
+            )
+            .optional()?;
+
+        Ok(DailyDigest {
+            total_tracked_ms,
+            total_active_ms: total_tracked_ms - total_idle_ms,
+            top_categories,
+            top_apps,
+            longest_focus,
+            most_idle,
+        })
+    }
+
+    fn get_label_provenance(&self, title_hash: &str) -> StorageResult<LabelProvenance> {
+        // Get the best label for this title_hash
+        let best_label = self.get_label(title_hash)?;
+
+        // If label is from a rule source, try to find which rule matched
+        let matching_rule = if let Some(ref label) = best_label {
+            match label.source {
+                LabelSource::User | LabelSource::Ai => {
+                    // Look up a segment with this title_hash to get app_name + window_title
+                    let conn = self.conn.lock().map_err(|e| e.to_string())?;
+                    let seg_info: Option<(String, Option<String>)> = conn
+                        .query_row(
+                            "SELECT app_name, window_title FROM segments WHERE title_hash = ?1 LIMIT 1",
+                            params![title_hash],
+                            |row| Ok((row.get(0)?, row.get(1)?)),
+                        )
+                        .optional()?;
+
+                    if let Some((app_name, window_title)) = seg_info {
+                        let title = window_title.as_deref().unwrap_or("");
+                        self.find_matching_rule(&app_name, title)?
+                    } else {
+                        None
+                    }
+                }
+                _ => None,
+            }
+        } else {
+            None
+        };
+
+        Ok(LabelProvenance {
+            best_label,
+            matching_rule,
+        })
     }
 
     fn get_config(&self, key: &str) -> StorageResult<Option<String>> {

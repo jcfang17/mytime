@@ -24,6 +24,11 @@ import {
   rejectSuggestion,
   getAppContexts,
   getSelectedBreakdown,
+  getTimelineSegments,
+  getDayRange,
+  getUnknownQueue,
+  getDailyDigest,
+  getLabelProvenance,
 } from "./api";
 import type {
   TrackingState,
@@ -36,11 +41,16 @@ import type {
   ContextSummary,
   CategoryBreakdownEntry,
   SelectedBreakdownRow,
+  TimelineSegment,
+  UnknownQueueItem,
+  DailyDigest,
+  LabelProvenance,
 } from "./types";
 import { getCategoryInfo, CATEGORY_INFO } from "./types";
 import "./App.css";
 
 type Page = "dashboard" | "settings";
+type DashboardTab = "overview" | "cleanup" | "digest";
 
 type ContextMenuState =
   | { kind: "app"; x: number; y: number; appName: string }
@@ -51,6 +61,7 @@ const BROWSER_APP_RE =
 
 function App() {
   const [currentPage, setCurrentPage] = useState<Page>("dashboard");
+  const [dashboardTab, setDashboardTab] = useState<DashboardTab>("overview");
   const [trackingState, setTrackingState] = useState<TrackingState>({
     is_tracking: false,
     session_start_ms: null,
@@ -98,6 +109,28 @@ function App() {
   const [selectedBreakdown, setSelectedBreakdown] = useState<SelectedBreakdownRow[]>([]);
   const [selectedBreakdownLoading, setSelectedBreakdownLoading] = useState(false);
 
+  // Timeline state
+  const [timelineSegments, setTimelineSegments] = useState<TimelineSegment[]>([]);
+  const [dayRange, setDayRange] = useState<[number, number] | null>(null);
+  const [hoveredSegment, setHoveredSegment] = useState<TimelineSegment | null>(null);
+  const [tooltipPos, setTooltipPos] = useState<{ x: number; y: number }>({ x: 0, y: 0 });
+
+  // Unknown cleanup queue state
+  const [unknownQueue, setUnknownQueue] = useState<UnknownQueueItem[]>([]);
+  const [unknownQueueLoading, setUnknownQueueLoading] = useState(false);
+
+  // Daily digest state
+  const [digest, setDigest] = useState<DailyDigest | null>(null);
+  const [digestLoading, setDigestLoading] = useState(false);
+
+  // Timeline drill-down state
+  const [selectedSegment, setSelectedSegment] = useState<TimelineSegment | null>(null);
+
+  // Label provenance state
+  const [provenance, setProvenance] = useState<LabelProvenance | null>(null);
+  const [provenanceLoading, setProvenanceLoading] = useState(false);
+  const [provenanceTitleHash, setProvenanceTitleHash] = useState<string | null>(null);
+
   // Load tracking state (fast poll)
   const loadTrackingState = useCallback(async () => {
     try {
@@ -141,6 +174,46 @@ function App() {
     }
   }, [dayOffset, selectedCategories]);
 
+  // Load timeline data
+  const loadTimeline = useCallback(async () => {
+    try {
+      const [segments, range] = await Promise.all([
+        getTimelineSegments(dayOffset),
+        getDayRange(dayOffset),
+      ]);
+      setTimelineSegments(segments);
+      setDayRange(range);
+    } catch (err) {
+      console.error("Failed to load timeline:", err);
+    }
+  }, [dayOffset]);
+
+  // Load unknown cleanup queue
+  const loadUnknownQueue = useCallback(async () => {
+    try {
+      setUnknownQueueLoading(true);
+      const queue = await getUnknownQueue(dayOffset);
+      setUnknownQueue(queue);
+    } catch (err) {
+      console.error("Failed to load unknown queue:", err);
+    } finally {
+      setUnknownQueueLoading(false);
+    }
+  }, [dayOffset]);
+
+  // Load daily digest
+  const loadDigest = useCallback(async () => {
+    try {
+      setDigestLoading(true);
+      const data = await getDailyDigest(dayOffset);
+      setDigest(data);
+    } catch (err) {
+      console.error("Failed to load digest:", err);
+    } finally {
+      setDigestLoading(false);
+    }
+  }, [dayOffset]);
+
   // Load settings
   const loadSettings = useCallback(async () => {
     try {
@@ -179,10 +252,13 @@ function App() {
   useEffect(() => {
     loadTrackingState();
     loadBreakdown();
+    loadTimeline();
+    loadUnknownQueue();
+    loadDigest();
     loadSettings();
     loadRules();
     loadSuggestions();
-  }, [loadTrackingState, loadBreakdown, loadSettings, loadRules, loadSuggestions]);
+  }, [loadTrackingState, loadBreakdown, loadTimeline, loadUnknownQueue, loadDigest, loadSettings, loadRules, loadSuggestions]);
 
   // Fast poll for tracking state (1s)
   useEffect(() => {
@@ -190,11 +266,15 @@ function App() {
     return () => clearInterval(interval);
   }, [loadTrackingState]);
 
-  // Slow poll for breakdown data (5s)
+  // Slow poll for breakdown + timeline + unknown queue data (5s)
   useEffect(() => {
-    const interval = setInterval(loadBreakdown, 5000);
+    const interval = setInterval(() => {
+      loadBreakdown();
+      loadTimeline();
+      loadUnknownQueue();
+    }, 5000);
     return () => clearInterval(interval);
-  }, [loadBreakdown]);
+  }, [loadBreakdown, loadTimeline, loadUnknownQueue]);
 
   // Keep selected breakdown in sync (immediate + slow poll when active)
   useEffect(() => {
@@ -438,6 +518,7 @@ function App() {
       setShowRuleForm(false);
       loadRules();
       loadBreakdown(); // Refresh to show new categorizations
+      loadUnknownQueue(); // Refresh cleanup queue after rule creation
       setContextsByApp({});
       await reloadExpandedAppContexts();
       await loadSelectedBreakdown();
@@ -558,6 +639,26 @@ function App() {
     setShowRuleForm(true);
   };
 
+  // Show label provenance (why a segment is labeled with a certain category)
+  const handleShowProvenance = async (titleHash: string) => {
+    if (provenanceTitleHash === titleHash) {
+      // Toggle off
+      setProvenanceTitleHash(null);
+      setProvenance(null);
+      return;
+    }
+    setProvenanceTitleHash(titleHash);
+    setProvenanceLoading(true);
+    try {
+      const prov = await getLabelProvenance(titleHash);
+      setProvenance(prov);
+    } catch (err) {
+      console.error("Failed to load provenance:", err);
+    } finally {
+      setProvenanceLoading(false);
+    }
+  };
+
   // Calculate display time
   // When tracking: use baseline (time at session start) + elapsed session time
   // When stopped: use total_time_ms from database
@@ -600,6 +701,12 @@ function App() {
 
   // Calculate total tracked time (all categories)
   const totalTrackedMs = activeCategoryBreakdown.reduce((sum, [, ms]) => sum + ms, 0);
+
+  // Unconditional totals for header (always show all three regardless of toggle)
+  const unconditionalTotalMs = useMemo(() => {
+    return categoryBreakdown.reduce((sum, entry) => sum + entry.total_ms, 0);
+  }, [categoryBreakdown]);
+  const unconditionalActiveMs = unconditionalTotalMs - totalIdleMs;
 
   // Calculate selected categories total
   const selectedTotalMs = useMemo(() => {
@@ -701,13 +808,67 @@ function App() {
               </div>
             </header>
 
+            {/* Date navigation (shared across tabs) */}
+            <section className="date-nav">
+              <button className="btn btn-icon" onClick={handlePrevDay}>
+                ◀
+              </button>
+              <span className="date-label">{dayLabel}</span>
+              <button
+                className="btn btn-icon"
+                onClick={handleNextDay}
+                disabled={dayOffset >= 0}
+              >
+                ▶
+              </button>
+              <label className="checkbox-label">
+                <input
+                  type="checkbox"
+                  checked={showActiveOnly}
+                  onChange={(e) => setShowActiveOnly(e.target.checked)}
+                />
+                Active only
+              </label>
+            </section>
+
+            {/* Dashboard tabs */}
+            <nav className="dashboard-tabs">
+              <button
+                className={`dashboard-tab ${dashboardTab === "overview" ? "active" : ""}`}
+                onClick={() => setDashboardTab("overview")}
+              >
+                Overview
+              </button>
+              <button
+                className={`dashboard-tab ${dashboardTab === "cleanup" ? "active" : ""}`}
+                onClick={() => setDashboardTab("cleanup")}
+              >
+                Cleanup
+                {unknownQueue.length > 0 && (
+                  <span className="tab-badge">{unknownQueue.length}</span>
+                )}
+              </button>
+              <button
+                className={`dashboard-tab ${dashboardTab === "digest" ? "active" : ""}`}
+                onClick={() => setDashboardTab("digest")}
+              >
+                Digest
+              </button>
+            </nav>
+
+            {/* Overview tab */}
+            {dashboardTab === "overview" && <>
+
             {/* Category breakdown */}
             {activeCategoryBreakdown.length > 0 && (
               <section className="category-section">
                 {/* Summary row: total + idle + selected */}
                 <div className="category-summary">
                   <span className="summary-total">
-                    {showActiveOnly ? "Active" : "Total"}: <strong>{formatDurationLocal(totalTrackedMs)}</strong>
+                    Total: <strong>{formatDurationLocal(unconditionalTotalMs)}</strong>
+                  </span>
+                  <span className="summary-active">
+                    Active: <strong>{formatDurationLocal(unconditionalActiveMs)}</strong>
                   </span>
                   {totalIdleMs > 0 && (
                     <span className="summary-idle">
@@ -750,28 +911,226 @@ function App() {
               </section>
             )}
 
-            {/* Date navigation */}
-            <section className="date-nav">
-              <button className="btn btn-icon" onClick={handlePrevDay}>
-                ◀
-              </button>
-              <span className="date-label">{dayLabel}</span>
-              <button
-                className="btn btn-icon"
-                onClick={handleNextDay}
-                disabled={dayOffset >= 0}
-              >
-                ▶
-              </button>
-              <label className="checkbox-label">
-                <input
-                  type="checkbox"
-                  checked={showActiveOnly}
-                  onChange={(e) => setShowActiveOnly(e.target.checked)}
-                />
-                Active only
-              </label>
-            </section>
+            {/* Timeline bar */}
+            {dayRange && timelineSegments.length > 0 && (() => {
+              const [rangeStart, rangeEnd] = dayRange;
+              const rangeDuration = rangeEnd - rangeStart;
+              // Compute hour labels
+              const startHour = new Date(rangeStart).getHours();
+              const hourLabels: number[] = [];
+              for (let h = startHour; h < startHour + 24; h++) {
+                const hour = h % 24;
+                const hourMs = rangeStart + (h - startHour) * 3600000;
+                if (hourMs >= rangeStart && hourMs <= rangeEnd) {
+                  hourLabels.push(hour);
+                }
+              }
+              return (
+                <section className="timeline-section">
+                  <div
+                    className="timeline-bar"
+                    onMouseLeave={() => setHoveredSegment(null)}
+                  >
+                    {timelineSegments.map((seg) => {
+                      const left = ((seg.start_time - rangeStart) / rangeDuration) * 100;
+                      const width = ((seg.end_time - seg.start_time) / rangeDuration) * 100;
+                      const catInfo = getCategoryInfo(seg.category);
+                      const durationMs = seg.end_time - seg.start_time;
+                      const idleMs = seg.idle_seconds * 1000;
+                      const idleRatio = durationMs > 0 ? idleMs / durationMs : 0;
+                      const mostlyIdle = idleRatio > 0.5;
+                      return (
+                        <div
+                          key={seg.segment_id}
+                          className={`timeline-segment ${selectedSegment?.segment_id === seg.segment_id ? "selected" : ""} ${mostlyIdle ? "idle" : ""}`}
+                          style={{
+                            left: `${left}%`,
+                            width: `${Math.max(width, 0.15)}%`,
+                            backgroundColor: mostlyIdle ? "var(--bg-tertiary)" : catInfo.color,
+                          }}
+                          onMouseEnter={(e) => {
+                            setHoveredSegment(seg);
+                            setTooltipPos({ x: e.clientX, y: e.clientY });
+                          }}
+                          onMouseMove={(e) => {
+                            setTooltipPos({ x: e.clientX, y: e.clientY });
+                          }}
+                          onClick={() => {
+                            setSelectedSegment(
+                              selectedSegment?.segment_id === seg.segment_id ? null : seg
+                            );
+                            setProvenanceTitleHash(null);
+                            setProvenance(null);
+                          }}
+                        />
+                      );
+                    })}
+                  </div>
+                  <div className="timeline-labels">
+                    {hourLabels.map((hour) => {
+                      const hourMs = rangeStart + ((hour - startHour + 24) % 24) * 3600000;
+                      const leftPct = ((hourMs - rangeStart) / rangeDuration) * 100;
+                      return (
+                        <span
+                          key={hour}
+                          className="timeline-hour-label"
+                          style={{ left: `${leftPct}%` }}
+                        >
+                          {hour.toString().padStart(2, "0")}
+                        </span>
+                      );
+                    })}
+                  </div>
+                  {hoveredSegment && (
+                    <div
+                      className="timeline-tooltip"
+                      style={{ left: tooltipPos.x + 12, top: tooltipPos.y - 60 }}
+                    >
+                      <strong>{hoveredSegment.friendly_name}</strong>
+                      {hoveredSegment.window_title && (
+                        <div className="tooltip-title">{hoveredSegment.window_title}</div>
+                      )}
+                      <div className="tooltip-time">
+                        {new Date(hoveredSegment.start_time).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}
+                        {" - "}
+                        {new Date(hoveredSegment.end_time).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}
+                      </div>
+                      <div className="tooltip-duration">
+                        {formatDurationLocal(hoveredSegment.end_time - hoveredSegment.start_time)}
+                        {" "}
+                        <span style={{ color: getCategoryInfo(hoveredSegment.category).color }}>
+                          {getCategoryInfo(hoveredSegment.category).label}
+                        </span>
+                      </div>
+                      {hoveredSegment.idle_seconds > 0 && (
+                        <div className="tooltip-idle">
+                          💤 {formatDurationLocal(hoveredSegment.idle_seconds * 1000)} idle
+                        </div>
+                      )}
+                    </div>
+                  )}
+                  {selectedSegment && (
+                    <div className="timeline-detail">
+                      <div className="timeline-detail-header">
+                        <span className="timeline-detail-app">
+                          {getCategoryInfo(selectedSegment.category).emoji}{" "}
+                          {selectedSegment.friendly_name}
+                        </span>
+                        <button
+                          className="btn btn-xs"
+                          onClick={() => {
+                            setSelectedSegment(null);
+                            setProvenanceTitleHash(null);
+                            setProvenance(null);
+                          }}
+                        >
+                          ✕
+                        </button>
+                      </div>
+                      {selectedSegment.window_title && (
+                        <div className="timeline-detail-title">
+                          {selectedSegment.window_title}
+                        </div>
+                      )}
+                      <div className="timeline-detail-row">
+                        <span>Time</span>
+                        <span>
+                          {new Date(selectedSegment.start_time).toLocaleTimeString([], {
+                            hour: "2-digit",
+                            minute: "2-digit",
+                            second: "2-digit",
+                          })}
+                          {" - "}
+                          {new Date(selectedSegment.end_time).toLocaleTimeString([], {
+                            hour: "2-digit",
+                            minute: "2-digit",
+                            second: "2-digit",
+                          })}
+                        </span>
+                      </div>
+                      <div className="timeline-detail-row">
+                        <span>Duration</span>
+                        <span>
+                          {formatDurationLocal(
+                            selectedSegment.end_time - selectedSegment.start_time
+                          )}
+                        </span>
+                      </div>
+                      <div className="timeline-detail-row">
+                        <span>Category</span>
+                        <span
+                          style={{
+                            color: getCategoryInfo(selectedSegment.category).color,
+                          }}
+                        >
+                          {getCategoryInfo(selectedSegment.category).label}
+                        </span>
+                      </div>
+                      {selectedSegment.idle_seconds > 0 && (
+                        <div className="timeline-detail-row">
+                          <span>Idle</span>
+                          <span>
+                            {formatDurationLocal(selectedSegment.idle_seconds * 1000)}
+                          </span>
+                        </div>
+                      )}
+                      <button
+                        className="btn btn-sm btn-secondary"
+                        style={{ marginTop: 8 }}
+                        onClick={() =>
+                          handleShowProvenance(selectedSegment.title_hash)
+                        }
+                      >
+                        Why "{getCategoryInfo(selectedSegment.category).label}"?
+                      </button>
+                      {provenanceTitleHash === selectedSegment.title_hash && (
+                        <div className="provenance-panel">
+                          {provenanceLoading ? (
+                            <span>Loading...</span>
+                          ) : provenance?.best_label ? (
+                            <>
+                              <div className="provenance-source">
+                                {provenance.best_label.source === "manual" &&
+                                  "Manually set by you"}
+                                {provenance.best_label.source === "user" &&
+                                  "Matched by classification rule"}
+                                {provenance.best_label.source === "ai" &&
+                                  `AI classified (${Math.round(
+                                    (provenance.best_label.confidence || 0) * 100
+                                  )}% confidence)`}
+                                {provenance.best_label.source === "heuristic" &&
+                                  "Heuristic classification (app name pattern)"}
+                              </div>
+                              {provenance.matching_rule && (
+                                <div className="provenance-rule">
+                                  {provenance.matching_rule.app_pattern && (
+                                    <span className="pattern-badge">
+                                      App: {provenance.matching_rule.app_pattern}
+                                    </span>
+                                  )}
+                                  {provenance.matching_rule.title_pattern && (
+                                    <span className="pattern-badge">
+                                      Title: {provenance.matching_rule.title_pattern}
+                                    </span>
+                                  )}
+                                  <span className="match-type">
+                                    ({provenance.matching_rule.match_type})
+                                  </span>
+                                </div>
+                              )}
+                            </>
+                          ) : (
+                            <span className="provenance-none">
+                              No label assigned (defaults to "Other")
+                            </span>
+                          )}
+                        </div>
+                      )}
+                    </div>
+                  )}
+                </section>
+              );
+            })()}
 
             {/* App list */}
             <section className="app-list">
@@ -838,7 +1197,7 @@ function App() {
                             </span>
                             <span className="app-idle">
                               {row.idle_duration_ms > 0
-                                ? `?? ${formatDurationLocal(row.idle_duration_ms)}`
+                                ? `💤 ${formatDurationLocal(row.idle_duration_ms)}`
                                 : "-"}
                             </span>
                           </div>
@@ -957,6 +1316,175 @@ function App() {
                 </div>
               )}
             </section>
+
+            </>}
+
+            {/* Cleanup tab */}
+            {dashboardTab === "cleanup" && (
+              <div className="tab-content">
+                <section className="cleanup-queue">
+                  <h2>Unknown Activity</h2>
+                  <p className="setting-description">
+                    These activities have no category. Click "+ Rule" to create a classification rule.
+                  </p>
+
+                  {unknownQueueLoading && unknownQueue.length === 0 ? (
+                    <p className="no-data">Loading...</p>
+                  ) : unknownQueue.length === 0 ? (
+                    <p className="no-data">All caught up! No unknown activity for this day.</p>
+                  ) : (
+                    <div className="app-table">
+                      <div className="app-row header">
+                        <span className="app-name">Activity</span>
+                        <span className="app-time">Time</span>
+                        <span className="app-idle">Action</span>
+                      </div>
+                      {unknownQueue.map((item) => {
+                        const label = item.context
+                          ? `${item.friendly_name} \u00b7 ${item.context}`
+                          : item.friendly_name;
+                        return (
+                          <div
+                            key={`${item.app_name}:${item.context || ""}`}
+                            className="app-row"
+                          >
+                            <span className="app-name">
+                              <span className="app-icon">📁</span>
+                              {label}
+                              <span
+                                className="cleanup-sample"
+                                title={item.sample_titles.join("\n")}
+                              >
+                                ({item.segment_count} segments)
+                              </span>
+                            </span>
+                            <span className="app-time">
+                              {formatDurationLocal(item.total_duration_ms)}
+                            </span>
+                            <span className="app-idle">
+                              <button
+                                className="btn btn-sm btn-primary"
+                                onClick={() => {
+                                  setEditingRule(null);
+                                  setRuleForm({
+                                    appPattern: item.app_name,
+                                    titlePattern: item.context || "",
+                                    matchType: "contains",
+                                    category: "productivity",
+                                  });
+                                  setRulePreview(null);
+                                  setShowRuleForm(true);
+                                }}
+                              >
+                                + Rule
+                              </button>
+                            </span>
+                          </div>
+                        );
+                      })}
+                    </div>
+                  )}
+                </section>
+              </div>
+            )}
+
+            {/* Digest tab */}
+            {dashboardTab === "digest" && (
+              <div className="tab-content">
+                {digestLoading && !digest ? (
+                  <p className="no-data">Loading digest...</p>
+                ) : !digest || digest.total_tracked_ms === 0 ? (
+                  <p className="no-data">No data for this day</p>
+                ) : (
+                  <div className="digest-grid">
+                    <div className="digest-card">
+                      <div className="digest-card-title">
+                        {showActiveOnly ? "Active Time" : "Total Time"}
+                      </div>
+                      <div className="digest-card-value">
+                        {formatDurationLocal(
+                          showActiveOnly ? digest.total_active_ms : digest.total_tracked_ms
+                        )}
+                      </div>
+                      <div className="digest-card-detail">
+                        {showActiveOnly
+                          ? `Total: ${formatDurationLocal(digest.total_tracked_ms)}`
+                          : `Active: ${formatDurationLocal(digest.total_active_ms)}`}
+                      </div>
+                    </div>
+
+                    <div className="digest-card">
+                      <div className="digest-card-title">Top Categories</div>
+                      {digest.top_categories.map((cat) => {
+                        const info = getCategoryInfo(cat.category);
+                        const displayMs = showActiveOnly
+                          ? cat.duration_ms - cat.idle_ms
+                          : cat.duration_ms;
+                        const displayTotal = showActiveOnly
+                          ? digest.total_active_ms
+                          : digest.total_tracked_ms;
+                        const pct = displayTotal > 0
+                          ? Math.round((displayMs / displayTotal) * 100)
+                          : 0;
+                        return (
+                          <div key={cat.category} className="digest-row">
+                            <span>{info.emoji} {info.label}</span>
+                            <span>
+                              {formatDurationLocal(displayMs)} ({pct}%)
+                            </span>
+                          </div>
+                        );
+                      })}
+                    </div>
+
+                    <div className="digest-card">
+                      <div className="digest-card-title">Top Apps</div>
+                      {digest.top_apps.map((app) => {
+                        const info = getCategoryInfo(app.category);
+                        const displayMs = showActiveOnly
+                          ? app.duration_ms - app.idle_ms
+                          : app.duration_ms;
+                        return (
+                          <div key={app.app_name} className="digest-row">
+                            <span>{info.emoji} {app.friendly_name}</span>
+                            <span>{formatDurationLocal(displayMs)}</span>
+                          </div>
+                        );
+                      })}
+                    </div>
+
+                    {digest.longest_focus && (
+                      <div className="digest-card">
+                        <div className="digest-card-title">Longest Focus Block</div>
+                        <div className="digest-card-value">
+                          {formatDurationLocal(digest.longest_focus.duration_ms)}
+                        </div>
+                        <div className="digest-card-detail">
+                          {digest.longest_focus.friendly_name}
+                        </div>
+                      </div>
+                    )}
+
+                    {digest.most_idle && (
+                      <div className="digest-card">
+                        <div className="digest-card-title">Most Idle Window</div>
+                        <div className="digest-card-value">
+                          {formatDurationLocal(digest.most_idle.idle_seconds * 1000)}
+                        </div>
+                        <div className="digest-card-detail">
+                          {digest.most_idle.friendly_name}
+                          {digest.most_idle.window_title && (
+                            <span className="digest-card-subtitle">
+                              {" "}&mdash; {digest.most_idle.window_title}
+                            </span>
+                          )}
+                        </div>
+                      </div>
+                    )}
+                  </div>
+                )}
+              </div>
+            )}
           </div>
         )}
 

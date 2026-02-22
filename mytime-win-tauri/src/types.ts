@@ -96,6 +96,87 @@ export interface SelectedBreakdownRow {
   segment_count: number;
 }
 
+// === Daily Digest ===
+
+export interface DailyDigest {
+  total_tracked_ms: number;
+  total_active_ms: number;
+  top_categories: DigestCategoryEntry[];
+  top_apps: DigestAppEntry[];
+  longest_focus: DigestFocusBlock | null;
+  most_idle: DigestIdleEntry | null;
+}
+
+export interface DigestCategoryEntry {
+  category: string;
+  duration_ms: number;
+  idle_ms: number;
+  percentage: number;
+}
+
+export interface DigestAppEntry {
+  app_name: string;
+  friendly_name: string;
+  duration_ms: number;
+  idle_ms: number;
+  category: string | null;
+}
+
+export interface DigestFocusBlock {
+  app_name: string;
+  friendly_name: string;
+  duration_ms: number;
+}
+
+export interface DigestIdleEntry {
+  app_name: string;
+  friendly_name: string;
+  window_title: string;
+  idle_seconds: number;
+  duration_ms: number;
+}
+
+// === Unknown Cleanup Queue ===
+
+export interface UnknownQueueItem {
+  app_name: string;
+  friendly_name: string;
+  context: string | null;
+  total_duration_ms: number;
+  idle_duration_ms: number;
+  segment_count: number;
+  sample_titles: string[];
+}
+
+// === Timeline ===
+
+export interface TimelineSegment {
+  segment_id: string;
+  app_name: string;
+  friendly_name: string;
+  window_title: string | null;
+  title_hash: string;
+  start_time: number;
+  end_time: number;
+  category: string;
+  idle_seconds: number;
+}
+
+// === Label Provenance ===
+
+export interface Label {
+  title_hash: string;
+  category: string;
+  source: string; // "manual" | "user" | "ai" | "heuristic"
+  confidence: number | null;
+  updated_at: number;
+}
+
+export interface LabelProvenance {
+  best_label: Label | null;
+  matching_rule: ClassificationRule | null;
+}
+
 // === AI Suggestions ===
 
 export type SuggestionStatus = "pending" | "approved" | "rejected" | "expired";

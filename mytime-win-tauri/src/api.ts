@@ -1,7 +1,7 @@
 // API functions for communicating with the Tauri backend
 
 import { invoke } from "@tauri-apps/api/core";
-import type { TrackingState, AppSummary, ClassificationRule, RulePreview, MatchType, ContextSummary, AiSuggestion, CategoryBreakdownEntry, SelectedBreakdownRow } from "./types";
+import type { TrackingState, AppSummary, ClassificationRule, RulePreview, MatchType, ContextSummary, AiSuggestion, CategoryBreakdownEntry, SelectedBreakdownRow, TimelineSegment, UnknownQueueItem, DailyDigest, LabelProvenance } from "./types";
 
 export async function startTracking(): Promise<TrackingState> {
   return await invoke("start_tracking");
@@ -156,6 +156,44 @@ export async function previewRuleMatches(
     matchType,
     daysBack,
   });
+}
+
+// === Timeline API ===
+
+export async function getTimelineSegments(
+  dayOffset: number
+): Promise<TimelineSegment[]> {
+  return await invoke("get_timeline_segments", { dayOffset });
+}
+
+export async function getDayRange(
+  dayOffset: number
+): Promise<[number, number]> {
+  return await invoke("get_day_range", { dayOffset });
+}
+
+// === Daily Digest API ===
+
+export async function getDailyDigest(
+  dayOffset: number
+): Promise<DailyDigest> {
+  return await invoke("get_daily_digest", { dayOffset });
+}
+
+// === Label Provenance API ===
+
+export async function getLabelProvenance(
+  titleHash: string
+): Promise<LabelProvenance> {
+  return await invoke("get_label_provenance", { titleHash });
+}
+
+// === Unknown Cleanup Queue API ===
+
+export async function getUnknownQueue(
+  dayOffset: number
+): Promise<UnknownQueueItem[]> {
+  return await invoke("get_unknown_queue", { dayOffset });
 }
 
 // === AI Suggestions API ===

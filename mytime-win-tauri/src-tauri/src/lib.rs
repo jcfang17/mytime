@@ -10,8 +10,9 @@ mod tracker;
 mod utils;
 
 use models::{
-    AiSuggestion, AppSummary, ClassificationRule, ContextSummary, Label, LabelSource, MatchType,
-    RuleSource, SelectedBreakdownRow, SuggestionStatus, TrackingState,
+    AiSuggestion, AppSummary, ClassificationRule, ContextSummary, DailyDigest, Label,
+    LabelProvenance, LabelSource, MatchType, RuleSource, SelectedBreakdownRow, SuggestionStatus,
+    TimelineSegment, TrackingState, UnknownQueueItem,
 };
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
@@ -56,7 +57,7 @@ fn start_tracking(state: State<AppState>) -> Result<TrackingState, String> {
     }
 
     // Capture baseline total time before starting (to avoid double-counting)
-    let baseline = state.storage.get_today_active_ms().unwrap_or(0);
+    let baseline = state.storage.get_today_total_ms().unwrap_or(0);
 
     state.is_tracking.store(true, Ordering::SeqCst);
     state.should_stop.store(false, Ordering::SeqCst);
@@ -105,9 +106,36 @@ fn get_tracking_state(state: State<AppState>) -> Result<TrackingState, String> {
 
 fn get_tracking_state_inner(state: &AppState) -> TrackingState {
     let is_tracking = state.is_tracking.load(Ordering::SeqCst);
-    let session_start_ms = *state.session_start_ms.lock().unwrap();
-    let baseline_ms = *state.baseline_ms.lock().unwrap();
-    let total_time_ms = state.storage.get_today_active_ms().unwrap_or(0);
+
+    // If tracking, detect day boundary crossing and reset baseline/session_start.
+    // When a session spans the day-start boundary (e.g. 6 AM rollover),
+    // we clamp session_start to the boundary and reset baseline to 0
+    // so the live timer only shows today's portion.
+    let (session_start_ms, baseline_ms) = {
+        let mut session_start = state.session_start_ms.lock().unwrap();
+        let mut baseline = state.baseline_ms.lock().unwrap();
+
+        if is_tracking {
+            if let Some(start) = *session_start {
+                let day_start_hour = state
+                    .storage
+                    .get_day_start_hour()
+                    .unwrap_or(utils::DEFAULT_DAY_START_HOUR);
+                let today_start = utils::today_start_ms_with_hour(day_start_hour);
+
+                if start < today_start {
+                    // Day boundary crossed during this tracking session.
+                    // Reset to today's boundary: no prior time existed in the new day.
+                    *session_start = Some(today_start);
+                    *baseline = Some(0);
+                }
+            }
+        }
+
+        (*session_start, *baseline)
+    };
+
+    let total_time_ms = state.storage.get_today_total_ms().unwrap_or(0);
 
     TrackingState {
         is_tracking,
@@ -248,6 +276,106 @@ fn get_selected_breakdown(
 }
 
 #[tauri::command]
+fn get_timeline_segments(
+    state: State<AppState>,
+    day_offset: i32,
+) -> Result<Vec<TimelineSegment>, String> {
+    let day_start_hour = state
+        .storage
+        .get_day_start_hour()
+        .unwrap_or(utils::DEFAULT_DAY_START_HOUR);
+    let (start_ms, end_ms) = utils::day_range_ms_with_offset(day_start_hour, day_offset);
+
+    let end_ms = if day_offset == 0 {
+        utils::now_ms()
+    } else {
+        end_ms
+    };
+
+    state
+        .storage
+        .get_timeline_segments(start_ms, end_ms)
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+fn get_day_range(
+    state: State<AppState>,
+    day_offset: i32,
+) -> Result<(i64, i64), String> {
+    let day_start_hour = state
+        .storage
+        .get_day_start_hour()
+        .unwrap_or(utils::DEFAULT_DAY_START_HOUR);
+    let (start_ms, end_ms) = utils::day_range_ms_with_offset(day_start_hour, day_offset);
+
+    let end_ms = if day_offset == 0 {
+        utils::now_ms()
+    } else {
+        end_ms
+    };
+
+    Ok((start_ms, end_ms))
+}
+
+#[tauri::command]
+fn get_unknown_queue(
+    state: State<AppState>,
+    day_offset: i32,
+) -> Result<Vec<UnknownQueueItem>, String> {
+    let day_start_hour = state
+        .storage
+        .get_day_start_hour()
+        .unwrap_or(utils::DEFAULT_DAY_START_HOUR);
+    let (start_ms, end_ms) = utils::day_range_ms_with_offset(day_start_hour, day_offset);
+
+    let end_ms = if day_offset == 0 {
+        utils::now_ms()
+    } else {
+        end_ms
+    };
+
+    state
+        .storage
+        .get_unknown_queue(start_ms, end_ms)
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+fn get_daily_digest(
+    state: State<AppState>,
+    day_offset: i32,
+) -> Result<DailyDigest, String> {
+    let day_start_hour = state
+        .storage
+        .get_day_start_hour()
+        .unwrap_or(utils::DEFAULT_DAY_START_HOUR);
+    let (start_ms, end_ms) = utils::day_range_ms_with_offset(day_start_hour, day_offset);
+
+    let end_ms = if day_offset == 0 {
+        utils::now_ms()
+    } else {
+        end_ms
+    };
+
+    state
+        .storage
+        .get_daily_digest(start_ms, end_ms)
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+fn get_label_provenance(
+    state: State<AppState>,
+    title_hash: String,
+) -> Result<LabelProvenance, String> {
+    state
+        .storage
+        .get_label_provenance(&title_hash)
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
 fn set_app_category(
     state: State<AppState>,
     app_name: String,
@@ -296,8 +424,12 @@ fn set_app_category(
 }
 
 #[tauri::command]
-fn get_day_label(day_offset: i32) -> String {
-    utils::format_day_label(day_offset)
+fn get_day_label(state: State<AppState>, day_offset: i32) -> String {
+    let day_start_hour = state
+        .storage
+        .get_day_start_hour()
+        .unwrap_or(utils::DEFAULT_DAY_START_HOUR);
+    utils::format_day_label(day_start_hour, day_offset)
 }
 
 #[tauri::command]
@@ -324,8 +456,13 @@ async fn export_csv(
 ) -> Result<usize, String> {
     use tauri_plugin_dialog::DialogExt;
 
+    let day_start_hour = state
+        .storage
+        .get_day_start_hour()
+        .unwrap_or(utils::DEFAULT_DAY_START_HOUR);
+
     // Show save dialog
-    let day_label = utils::format_day_label(day_offset);
+    let day_label = utils::format_day_label(day_start_hour, day_offset);
     let default_name = format!("mytime-{}.csv", day_label.replace(" ", "-").to_lowercase());
 
     let file_path = app
@@ -340,10 +477,6 @@ async fn export_csv(
         None => return Ok(0), // User cancelled
     };
 
-    let day_start_hour = state
-        .storage
-        .get_day_start_hour()
-        .unwrap_or(utils::DEFAULT_DAY_START_HOUR);
     let (start_ms, end_ms) = utils::day_range_ms_with_offset(day_start_hour, day_offset);
 
     let end_ms = if day_offset == 0 {
@@ -810,6 +943,11 @@ pub fn run() {
             get_category_breakdown,
             get_app_contexts,
             get_selected_breakdown,
+            get_timeline_segments,
+            get_day_range,
+            get_unknown_queue,
+            get_daily_digest,
+            get_label_provenance,
             set_app_category,
             get_day_label,
             get_day_start_hour,
