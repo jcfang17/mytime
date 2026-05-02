@@ -1616,3 +1616,228 @@ impl StorageAdapter for SqliteStorage {
     }
 
 }
+
+#[cfg(test)]
+impl SqliteStorage {
+    /// Test-only constructor backed by an in-memory SQLite connection.
+    /// Skips bootstrap config / data-dir resolution so tests don't touch the filesystem.
+    pub(crate) fn new_in_memory() -> StorageResult<Self> {
+        let conn = Connection::open_in_memory()?;
+        conn.execute_batch("PRAGMA foreign_keys = ON;")?;
+        let storage = Self {
+            conn: Mutex::new(conn),
+        };
+        storage.run_migrations()?;
+        storage.ensure_device_id()?;
+        Ok(storage)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::models::{LabelSource, Segment};
+
+    const HOUR_MS: i64 = 3_600_000;
+
+    fn make_segment(
+        app: &str,
+        title_hash: &str,
+        start_ms: i64,
+        end_ms: i64,
+        idle_seconds: u64,
+    ) -> Segment {
+        Segment {
+            segment_id: uuid::Uuid::new_v4().to_string(),
+            app_name: app.to_string(),
+            window_title: Some(format!("{}-title", title_hash)),
+            title_hash: title_hash.to_string(),
+            start_time: start_ms,
+            end_time: end_ms,
+            idle_seconds,
+            keystrokes: 0,
+            mouse_clicks: 0,
+            focus_session_id: "test-session".to_string(),
+            device_id: None,
+            schema_version: 1,
+            created_at: end_ms,
+        }
+    }
+
+    fn make_label(title_hash: &str, category: &str, source: LabelSource) -> Label {
+        Label {
+            title_hash: title_hash.to_string(),
+            category: category.to_string(),
+            source,
+            confidence: None,
+            updated_at: 0,
+        }
+    }
+
+    /// Window: [6h, 30h). Segment from 5h to 7h with 60s idle over 2h total.
+    /// Expect: duration clamped to 1h (6h–7h); idle pro-rated to 30s.
+    #[test]
+    fn app_breakdown_clamps_segment_overlapping_window_start() {
+        let storage = SqliteStorage::new_in_memory().unwrap();
+        let day_start = 6 * HOUR_MS;
+        let day_end = 30 * HOUR_MS;
+
+        let seg = make_segment("notepad.exe", "h1", 5 * HOUR_MS, 7 * HOUR_MS, 60);
+        storage.insert_segment(&seg).unwrap();
+
+        let breakdown = storage.get_app_breakdown(day_start, day_end).unwrap();
+        assert_eq!(breakdown.len(), 1);
+        assert_eq!(breakdown[0].app_name, "notepad.exe");
+        assert_eq!(breakdown[0].total_duration_ms, HOUR_MS);
+        // 60s * 1000 * (1h / 2h) = 30_000ms
+        assert_eq!(breakdown[0].idle_duration_ms, 30_000);
+    }
+
+    /// Window: [4h, 6h). Segment from 5h to 7h with 60s idle.
+    /// Expect: duration clamped to 1h (5h–6h); idle pro-rated to 30s.
+    #[test]
+    fn app_breakdown_clamps_segment_overlapping_window_end() {
+        let storage = SqliteStorage::new_in_memory().unwrap();
+        let win_start = 4 * HOUR_MS;
+        let win_end = 6 * HOUR_MS;
+
+        let seg = make_segment("code.exe", "h1", 5 * HOUR_MS, 7 * HOUR_MS, 60);
+        storage.insert_segment(&seg).unwrap();
+
+        let breakdown = storage.get_app_breakdown(win_start, win_end).unwrap();
+        assert_eq!(breakdown.len(), 1);
+        assert_eq!(breakdown[0].total_duration_ms, HOUR_MS);
+        assert_eq!(breakdown[0].idle_duration_ms, 30_000);
+    }
+
+    /// Segments fully before or after the window must not appear.
+    #[test]
+    fn app_breakdown_excludes_segments_outside_window() {
+        let storage = SqliteStorage::new_in_memory().unwrap();
+        let win_start = 10 * HOUR_MS;
+        let win_end = 12 * HOUR_MS;
+
+        // Fully before
+        storage
+            .insert_segment(&make_segment("a.exe", "h1", 1 * HOUR_MS, 2 * HOUR_MS, 0))
+            .unwrap();
+        // Fully after
+        storage
+            .insert_segment(&make_segment("b.exe", "h2", 20 * HOUR_MS, 21 * HOUR_MS, 0))
+            .unwrap();
+        // Touching boundary exactly (end == win_start) — overlap predicate is end > start
+        storage
+            .insert_segment(&make_segment("c.exe", "h3", 9 * HOUR_MS, 10 * HOUR_MS, 0))
+            .unwrap();
+
+        let breakdown = storage.get_app_breakdown(win_start, win_end).unwrap();
+        assert!(breakdown.is_empty(), "got: {:?}", breakdown);
+    }
+
+    /// Segment fully inside window: full duration counted, idle not pro-rated down.
+    #[test]
+    fn app_breakdown_segment_fully_inside_is_unchanged() {
+        let storage = SqliteStorage::new_in_memory().unwrap();
+        let win_start = 6 * HOUR_MS;
+        let win_end = 30 * HOUR_MS;
+
+        let seg = make_segment("foo.exe", "h1", 8 * HOUR_MS, 10 * HOUR_MS, 120);
+        storage.insert_segment(&seg).unwrap();
+
+        let breakdown = storage.get_app_breakdown(win_start, win_end).unwrap();
+        assert_eq!(breakdown.len(), 1);
+        assert_eq!(breakdown[0].total_duration_ms, 2 * HOUR_MS);
+        assert_eq!(breakdown[0].idle_duration_ms, 120 * 1000);
+    }
+
+    /// Category breakdown should clamp duration AND prefer manual > heuristic label.
+    #[test]
+    fn category_breakdown_clamps_and_picks_best_label() {
+        let storage = SqliteStorage::new_in_memory().unwrap();
+        let win_start = 6 * HOUR_MS;
+        let win_end = 30 * HOUR_MS;
+
+        // Segment straddling window start: 5h → 7h, so 1h falls in window
+        storage
+            .insert_segment(&make_segment("msedge.exe", "h1", 5 * HOUR_MS, 7 * HOUR_MS, 0))
+            .unwrap();
+
+        // Heuristic says entertainment, manual says productivity — manual must win
+        storage
+            .upsert_label(&make_label("h1", "entertainment", LabelSource::Heuristic))
+            .unwrap();
+        storage
+            .upsert_label(&make_label("h1", "productivity", LabelSource::Manual))
+            .unwrap();
+
+        let cats = storage
+            .get_segment_category_breakdown(win_start, win_end)
+            .unwrap();
+
+        assert_eq!(cats.len(), 1);
+        assert_eq!(cats[0].0, "productivity");
+        assert_eq!(cats[0].1, HOUR_MS); // clamped duration
+    }
+
+    /// Segments without any label fall through as `unknown`.
+    #[test]
+    fn category_breakdown_unlabeled_falls_to_unknown() {
+        let storage = SqliteStorage::new_in_memory().unwrap();
+        let win_start = 0;
+        let win_end = 100 * HOUR_MS;
+
+        storage
+            .insert_segment(&make_segment("mystery.exe", "h1", 1 * HOUR_MS, 2 * HOUR_MS, 0))
+            .unwrap();
+
+        let cats = storage
+            .get_segment_category_breakdown(win_start, win_end)
+            .unwrap();
+
+        assert_eq!(cats.len(), 1);
+        assert_eq!(cats[0].0, "unknown");
+        assert_eq!(cats[0].1, HOUR_MS);
+    }
+
+    /// Multiple segments aggregated by app, with one straddling — totals should sum cleanly.
+    #[test]
+    fn app_breakdown_aggregates_multiple_segments_per_app() {
+        let storage = SqliteStorage::new_in_memory().unwrap();
+        let win_start = 6 * HOUR_MS;
+        let win_end = 30 * HOUR_MS;
+
+        // Fully inside: 2h
+        storage
+            .insert_segment(&make_segment("code.exe", "h1", 8 * HOUR_MS, 10 * HOUR_MS, 0))
+            .unwrap();
+        // Straddling start: contributes 1h (6h–7h)
+        storage
+            .insert_segment(&make_segment("code.exe", "h2", 5 * HOUR_MS, 7 * HOUR_MS, 0))
+            .unwrap();
+
+        let breakdown = storage.get_app_breakdown(win_start, win_end).unwrap();
+        assert_eq!(breakdown.len(), 1);
+        assert_eq!(breakdown[0].segment_count, 2);
+        assert_eq!(breakdown[0].total_duration_ms, 3 * HOUR_MS);
+    }
+
+    /// Timeline segments should report clamped start/end, not raw segment bounds.
+    #[test]
+    fn timeline_segments_clamp_to_window() {
+        let storage = SqliteStorage::new_in_memory().unwrap();
+        let win_start = 6 * HOUR_MS;
+        let win_end = 30 * HOUR_MS;
+
+        storage
+            .insert_segment(&make_segment("foo.exe", "h1", 5 * HOUR_MS, 7 * HOUR_MS, 60))
+            .unwrap();
+
+        let timeline = storage.get_timeline_segments(win_start, win_end).unwrap();
+        assert_eq!(timeline.len(), 1);
+        assert_eq!(timeline[0].start_time, win_start, "clamped to window start");
+        assert_eq!(timeline[0].end_time, 7 * HOUR_MS);
+        // idle pro-rated: 60s * (1h/2h) = 30s
+        assert_eq!(timeline[0].idle_seconds, 30);
+    }
+}
+
