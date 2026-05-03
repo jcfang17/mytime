@@ -6,8 +6,11 @@ mod sqlite;
 
 pub use sqlite::SqliteStorage;
 
-use crate::models::{AiSuggestion, AppSummary, ClassificationRule, ContextSummary, DailyDigest, Label, LabelProvenance, Segment, TimelineSegment, UnknownQueueItem};
 use crate::models::SelectedBreakdownRow;
+use crate::models::{
+    AiSuggestion, AppSummary, ClassificationRule, ContextSummary, DailyDigest, Label,
+    LabelProvenance, Segment, TimelineSegment, UnknownQueueItem,
+};
 use std::error::Error;
 
 /// Result type for storage operations
@@ -47,7 +50,11 @@ pub trait StorageAdapter: Send + Sync {
 
     /// Backfill labels for all segments matching a rule
     /// Used when a rule is created/edited to update historical data
-    fn backfill_labels_for_rule(&self, rule: &ClassificationRule, days_back: u32) -> StorageResult<u32>;
+    fn backfill_labels_for_rule(
+        &self,
+        rule: &ClassificationRule,
+        days_back: u32,
+    ) -> StorageResult<u32>;
 
     /// Get context breakdown within an app (e.g., sites within a browser)
     fn get_app_contexts(
@@ -72,10 +79,15 @@ pub trait StorageAdapter: Send + Sync {
     fn get_today_total_ms(&self) -> StorageResult<i64>;
 
     /// Get timeline segments for a day range, each annotated with its best category
-    fn get_timeline_segments(&self, start_ms: i64, end_ms: i64) -> StorageResult<Vec<TimelineSegment>>;
+    fn get_timeline_segments(
+        &self,
+        start_ms: i64,
+        end_ms: i64,
+    ) -> StorageResult<Vec<TimelineSegment>>;
 
     /// Get unknown-category segments grouped by (app_name, context) for the cleanup queue
-    fn get_unknown_queue(&self, start_ms: i64, end_ms: i64) -> StorageResult<Vec<UnknownQueueItem>>;
+    fn get_unknown_queue(&self, start_ms: i64, end_ms: i64)
+        -> StorageResult<Vec<UnknownQueueItem>>;
 
     /// Get daily digest statistics for a time range
     fn get_daily_digest(&self, start_ms: i64, end_ms: i64) -> StorageResult<DailyDigest>;

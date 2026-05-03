@@ -2,17 +2,17 @@
 
 use crate::models::{
     AiSuggestion, AppSummary, BootstrapConfig, ClassificationRule, ContextSummary, DailyDigest,
-    DataLocation, DigestAppEntry, DigestCategoryEntry, DigestFocusBlock,
-    DigestIdleEntry, Label, LabelProvenance, LabelSource, MatchType, RuleSource, Segment,
-    SelectedBreakdownRow, SuggestionStatus, TimelineSegment, UnknownQueueItem,
+    DataLocation, DigestAppEntry, DigestCategoryEntry, DigestFocusBlock, DigestIdleEntry, Label,
+    LabelProvenance, LabelSource, MatchType, RuleSource, Segment, SelectedBreakdownRow,
+    SuggestionStatus, TimelineSegment, UnknownQueueItem,
 };
 use crate::storage::{StorageAdapter, StorageResult};
 use crate::utils;
+use parking_lot::Mutex;
 use rusqlite::{params, Connection, OptionalExtension};
 use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::path::PathBuf;
-use std::sync::Mutex;
 
 /// SQLite storage implementation
 pub struct SqliteStorage {
@@ -23,7 +23,7 @@ impl SqliteStorage {
     /// Create a new SqliteStorage instance
     /// This handles bootstrap config, data location, and migrations
     pub fn new() -> StorageResult<Self> {
-        let data_dir = Self::determine_data_dir()?;
+        let data_dir = Self::data_dir()?;
 
         // Ensure data directory exists
         fs::create_dir_all(&data_dir)?;
@@ -51,8 +51,10 @@ impl SqliteStorage {
         Ok(storage)
     }
 
-    /// Determine the data directory based on bootstrap config
-    fn determine_data_dir() -> StorageResult<PathBuf> {
+    /// Determine the data directory based on bootstrap config.
+    /// Public so the tracing/logging layer can place log files in the same location
+    /// before the main `SqliteStorage` is constructed.
+    pub fn data_dir() -> StorageResult<PathBuf> {
         let exe_dir = std::env::current_exe()?
             .parent()
             .map(|p| p.to_path_buf())
@@ -239,11 +241,21 @@ impl SqliteStorage {
 
         Ok(())
     }
+
+    /// Run SQL migration v004 - composite overlap index
+    /// Speeds up the hot query shape `start_time < ? AND end_time > ?` by letting
+    /// SQLite use the leading column (end_time) for the upper bound.
+    fn run_migration_v004(conn: &Connection) -> StorageResult<()> {
+        conn.execute_batch(
+            "CREATE INDEX IF NOT EXISTS idx_segments_overlap ON segments(end_time, start_time);",
+        )?;
+        Ok(())
+    }
 }
 
 impl StorageAdapter for SqliteStorage {
     fn insert_segment(&self, segment: &Segment) -> StorageResult<()> {
-        let conn = self.conn.lock().map_err(|e| e.to_string())?;
+        let conn = self.conn.lock();
 
         conn.execute(
             r#"
@@ -274,7 +286,7 @@ impl StorageAdapter for SqliteStorage {
     }
 
     fn get_segments_range(&self, start_ms: i64, end_ms: i64) -> StorageResult<Vec<Segment>> {
-        let conn = self.conn.lock().map_err(|e| e.to_string())?;
+        let conn = self.conn.lock();
 
         let mut stmt = conn.prepare(
             r#"
@@ -311,7 +323,7 @@ impl StorageAdapter for SqliteStorage {
     }
 
     fn get_label(&self, title_hash: &str) -> StorageResult<Option<Label>> {
-        let conn = self.conn.lock().map_err(|e| e.to_string())?;
+        let conn = self.conn.lock();
 
         // Priority: user > ai > heuristic
         let label = conn
@@ -336,7 +348,8 @@ impl StorageAdapter for SqliteStorage {
                     Ok(Label {
                         title_hash: row.get(0)?,
                         category: row.get(1)?,
-                        source: LabelSource::from_str(&source_str).unwrap_or(LabelSource::Heuristic),
+                        source: LabelSource::from_str(&source_str)
+                            .unwrap_or(LabelSource::Heuristic),
                         confidence: row.get(3)?,
                         updated_at: row.get(4)?,
                     })
@@ -348,7 +361,7 @@ impl StorageAdapter for SqliteStorage {
     }
 
     fn upsert_label(&self, label: &Label) -> StorageResult<()> {
-        let conn = self.conn.lock().map_err(|e| e.to_string())?;
+        let conn = self.conn.lock();
 
         conn.execute(
             r#"
@@ -372,7 +385,7 @@ impl StorageAdapter for SqliteStorage {
     }
 
     fn get_app_breakdown(&self, start_ms: i64, end_ms: i64) -> StorageResult<Vec<AppSummary>> {
-        let conn = self.conn.lock().map_err(|e| e.to_string())?;
+        let conn = self.conn.lock();
 
         // First, get basic app stats
         // Use overlap-aware filtering: include segments that cross day boundaries
@@ -442,10 +455,11 @@ impl StorageAdapter for SqliteStorage {
         )?;
 
         for summary in &mut summaries {
-            if let Ok(category) = cat_stmt.query_row(
-                params![start_ms, end_ms, &summary.app_name],
-                |row| row.get::<_, String>(0),
-            ) {
+            if let Ok(category) = cat_stmt
+                .query_row(params![start_ms, end_ms, &summary.app_name], |row| {
+                    row.get::<_, String>(0)
+                })
+            {
                 summary.primary_category = Some(category);
             }
         }
@@ -458,7 +472,7 @@ impl StorageAdapter for SqliteStorage {
         start_ms: i64,
         end_ms: i64,
     ) -> StorageResult<Vec<(String, i64, i64)>> {
-        let conn = self.conn.lock().map_err(|e| e.to_string())?;
+        let conn = self.conn.lock();
 
         // Aggregate duration by segment-level category (using best label per title_hash)
         // This properly handles browsers where YouTube=entertainment and Overleaf=productivity
@@ -511,7 +525,7 @@ impl StorageAdapter for SqliteStorage {
         start_ms: i64,
         end_ms: i64,
     ) -> StorageResult<Vec<ContextSummary>> {
-        let conn = self.conn.lock().map_err(|e| e.to_string())?;
+        let conn = self.conn.lock();
 
         // Get all segments for this app in the time range
         // Use a CTE to get the best label per title_hash (user > ai > heuristic)
@@ -567,8 +581,8 @@ impl StorageAdapter for SqliteStorage {
             let title_str = title.as_deref().unwrap_or("");
 
             // Extract context from title
-            let context = utils::extract_context(app_name, title_str)
-                .unwrap_or_else(|| "other".to_string());
+            let context =
+                utils::extract_context(app_name, title_str).unwrap_or_else(|| "other".to_string());
 
             let entry = context_map.entry(context).or_insert_with(|| ContextData {
                 total_duration_ms: 0,
@@ -627,7 +641,7 @@ impl StorageAdapter for SqliteStorage {
         end_ms: i64,
         categories: &[String],
     ) -> StorageResult<Vec<SelectedBreakdownRow>> {
-        let conn = self.conn.lock().map_err(|e| e.to_string())?;
+        let conn = self.conn.lock();
 
         let wanted: HashSet<String> = categories.iter().map(|c| c.to_lowercase()).collect();
         if wanted.is_empty() {
@@ -746,7 +760,7 @@ impl StorageAdapter for SqliteStorage {
         let day_start_hour = self.get_day_start_hour()?;
         let start_ms = utils::today_start_ms_with_hour(day_start_hour);
 
-        let conn = self.conn.lock().map_err(|e| e.to_string())?;
+        let conn = self.conn.lock();
 
         // Include segments that overlap today's boundary and clamp their start
         let total: i64 = conn.query_row(
@@ -758,8 +772,12 @@ impl StorageAdapter for SqliteStorage {
         Ok(total)
     }
 
-    fn get_timeline_segments(&self, start_ms: i64, end_ms: i64) -> StorageResult<Vec<TimelineSegment>> {
-        let conn = self.conn.lock().map_err(|e| e.to_string())?;
+    fn get_timeline_segments(
+        &self,
+        start_ms: i64,
+        end_ms: i64,
+    ) -> StorageResult<Vec<TimelineSegment>> {
+        let conn = self.conn.lock();
 
         let mut stmt = conn.prepare(
             r#"
@@ -811,8 +829,12 @@ impl StorageAdapter for SqliteStorage {
         Ok(segments)
     }
 
-    fn get_unknown_queue(&self, start_ms: i64, end_ms: i64) -> StorageResult<Vec<UnknownQueueItem>> {
-        let conn = self.conn.lock().map_err(|e| e.to_string())?;
+    fn get_unknown_queue(
+        &self,
+        start_ms: i64,
+        end_ms: i64,
+    ) -> StorageResult<Vec<UnknownQueueItem>> {
+        let conn = self.conn.lock();
 
         let mut stmt = conn.prepare(
             r#"
@@ -866,8 +888,10 @@ impl StorageAdapter for SqliteStorage {
             let title_str = title.as_deref().unwrap_or("");
 
             let context = if utils::is_browser(&app_name) {
-                Some(utils::extract_context(&app_name, title_str)
-                    .unwrap_or_else(|| "other".to_string()))
+                Some(
+                    utils::extract_context(&app_name, title_str)
+                        .unwrap_or_else(|| "other".to_string()),
+                )
             } else {
                 None
             };
@@ -911,7 +935,7 @@ impl StorageAdapter for SqliteStorage {
     }
 
     fn get_daily_digest(&self, start_ms: i64, end_ms: i64) -> StorageResult<DailyDigest> {
-        let conn = self.conn.lock().map_err(|e| e.to_string())?;
+        let conn = self.conn.lock();
 
         // 1. Category breakdown (reuse same CTE pattern)
         let mut cat_stmt = conn.prepare(
@@ -944,7 +968,11 @@ impl StorageAdapter for SqliteStorage {
         )?;
 
         let cat_rows = cat_stmt.query_map(params![start_ms, end_ms], |row| {
-            Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?, row.get::<_, i64>(2)?))
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, i64>(1)?,
+                row.get::<_, i64>(2)?,
+            ))
         })?;
 
         let mut total_tracked_ms: i64 = 0;
@@ -1094,7 +1122,7 @@ impl StorageAdapter for SqliteStorage {
             match label.source {
                 LabelSource::User | LabelSource::Ai => {
                     // Look up a segment with this title_hash to get app_name + window_title
-                    let conn = self.conn.lock().map_err(|e| e.to_string())?;
+                    let conn = self.conn.lock();
                     let seg_info: Option<(String, Option<String>)> = conn
                         .query_row(
                             "SELECT app_name, window_title FROM segments WHERE title_hash = ?1 LIMIT 1",
@@ -1123,7 +1151,7 @@ impl StorageAdapter for SqliteStorage {
     }
 
     fn get_config(&self, key: &str) -> StorageResult<Option<String>> {
-        let conn = self.conn.lock().map_err(|e| e.to_string())?;
+        let conn = self.conn.lock();
 
         let value = conn
             .query_row(
@@ -1137,7 +1165,7 @@ impl StorageAdapter for SqliteStorage {
     }
 
     fn set_config(&self, key: &str, value: &str) -> StorageResult<()> {
-        let conn = self.conn.lock().map_err(|e| e.to_string())?;
+        let conn = self.conn.lock();
 
         conn.execute(
             "INSERT INTO config (key, value) VALUES (?1, ?2)
@@ -1151,7 +1179,7 @@ impl StorageAdapter for SqliteStorage {
     // === Classification Rules ===
 
     fn get_rules(&self) -> StorageResult<Vec<ClassificationRule>> {
-        let conn = self.conn.lock().map_err(|e| e.to_string())?;
+        let conn = self.conn.lock();
 
         let mut stmt = conn.prepare(
             r#"
@@ -1203,7 +1231,7 @@ impl StorageAdapter for SqliteStorage {
     }
 
     fn get_all_rules(&self) -> StorageResult<Vec<ClassificationRule>> {
-        let conn = self.conn.lock().map_err(|e| e.to_string())?;
+        let conn = self.conn.lock();
 
         // Return ALL rules (including disabled) for UI management
         let mut stmt = conn.prepare(
@@ -1255,7 +1283,7 @@ impl StorageAdapter for SqliteStorage {
     }
 
     fn get_rule(&self, rule_id: &str) -> StorageResult<Option<ClassificationRule>> {
-        let conn = self.conn.lock().map_err(|e| e.to_string())?;
+        let conn = self.conn.lock();
 
         let rule = conn
             .query_row(
@@ -1295,9 +1323,12 @@ impl StorageAdapter for SqliteStorage {
     }
 
     fn upsert_rule(&self, rule: &ClassificationRule) -> StorageResult<()> {
-        let conn = self.conn.lock().map_err(|e| e.to_string())?;
+        let conn = self.conn.lock();
 
-        let tags_json = rule.tags.as_ref().map(|t| serde_json::to_string(t).ok()).flatten();
+        let tags_json = rule
+            .tags
+            .as_ref()
+            .and_then(|t| serde_json::to_string(t).ok());
 
         conn.execute(
             r#"
@@ -1333,7 +1364,7 @@ impl StorageAdapter for SqliteStorage {
     }
 
     fn delete_rule(&self, rule_id: &str) -> StorageResult<()> {
-        let conn = self.conn.lock().map_err(|e| e.to_string())?;
+        let conn = self.conn.lock();
 
         conn.execute(
             "DELETE FROM classification_rules WHERE rule_id = ?1",
@@ -1361,7 +1392,11 @@ impl StorageAdapter for SqliteStorage {
         Ok(None)
     }
 
-    fn backfill_labels_for_rule(&self, rule: &ClassificationRule, days_back: u32) -> StorageResult<u32> {
+    fn backfill_labels_for_rule(
+        &self,
+        rule: &ClassificationRule,
+        days_back: u32,
+    ) -> StorageResult<u32> {
         use crate::utils::{day_range_ms_with_offset, now_ms, DEFAULT_DAY_START_HOUR};
         use std::collections::HashSet;
 
@@ -1420,7 +1455,7 @@ impl StorageAdapter for SqliteStorage {
     // === AI Suggestions ===
 
     fn get_pending_suggestions(&self) -> StorageResult<Vec<AiSuggestion>> {
-        let conn = self.conn.lock().map_err(|e| e.to_string())?;
+        let conn = self.conn.lock();
 
         let mut stmt = conn.prepare(
             r#"
@@ -1466,7 +1501,7 @@ impl StorageAdapter for SqliteStorage {
     }
 
     fn get_suggestion(&self, suggestion_id: &str) -> StorageResult<Option<AiSuggestion>> {
-        let conn = self.conn.lock().map_err(|e| e.to_string())?;
+        let conn = self.conn.lock();
 
         let suggestion = conn
             .query_row(
@@ -1511,7 +1546,7 @@ impl StorageAdapter for SqliteStorage {
     }
 
     fn insert_suggestion(&self, suggestion: &AiSuggestion) -> StorageResult<()> {
-        let conn = self.conn.lock().map_err(|e| e.to_string())?;
+        let conn = self.conn.lock();
 
         let sample_titles_json = serde_json::to_string(&suggestion.sample_titles).ok();
 
@@ -1548,7 +1583,7 @@ impl StorageAdapter for SqliteStorage {
         suggestion_id: &str,
         status: SuggestionStatus,
     ) -> StorageResult<()> {
-        let conn = self.conn.lock().map_err(|e| e.to_string())?;
+        let conn = self.conn.lock();
 
         let now = chrono::Utc::now().timestamp_millis();
 
@@ -1561,7 +1596,7 @@ impl StorageAdapter for SqliteStorage {
     }
 
     fn run_migrations(&self) -> StorageResult<()> {
-        let conn = self.conn.lock().map_err(|e| e.to_string())?;
+        let conn = self.conn.lock();
 
         // Create schema_migrations table first if not exists
         conn.execute(
@@ -1612,9 +1647,18 @@ impl StorageAdapter for SqliteStorage {
             )?;
         }
 
+        if current_version < 4 {
+            Self::run_migration_v004(&conn)?;
+
+            let now = chrono::Utc::now().timestamp_millis();
+            conn.execute(
+                "INSERT INTO schema_migrations (version, applied_at) VALUES (?1, ?2)",
+                params![4, now],
+            )?;
+        }
+
         Ok(())
     }
-
 }
 
 #[cfg(test)]
@@ -1719,7 +1763,7 @@ mod tests {
 
         // Fully before
         storage
-            .insert_segment(&make_segment("a.exe", "h1", 1 * HOUR_MS, 2 * HOUR_MS, 0))
+            .insert_segment(&make_segment("a.exe", "h1", HOUR_MS, 2 * HOUR_MS, 0))
             .unwrap();
         // Fully after
         storage
@@ -1759,7 +1803,13 @@ mod tests {
 
         // Segment straddling window start: 5h → 7h, so 1h falls in window
         storage
-            .insert_segment(&make_segment("msedge.exe", "h1", 5 * HOUR_MS, 7 * HOUR_MS, 0))
+            .insert_segment(&make_segment(
+                "msedge.exe",
+                "h1",
+                5 * HOUR_MS,
+                7 * HOUR_MS,
+                0,
+            ))
             .unwrap();
 
         // Heuristic says entertainment, manual says productivity — manual must win
@@ -1787,7 +1837,13 @@ mod tests {
         let win_end = 100 * HOUR_MS;
 
         storage
-            .insert_segment(&make_segment("mystery.exe", "h1", 1 * HOUR_MS, 2 * HOUR_MS, 0))
+            .insert_segment(&make_segment(
+                "mystery.exe",
+                "h1",
+                HOUR_MS,
+                2 * HOUR_MS,
+                0,
+            ))
             .unwrap();
 
         let cats = storage
@@ -1808,7 +1864,13 @@ mod tests {
 
         // Fully inside: 2h
         storage
-            .insert_segment(&make_segment("code.exe", "h1", 8 * HOUR_MS, 10 * HOUR_MS, 0))
+            .insert_segment(&make_segment(
+                "code.exe",
+                "h1",
+                8 * HOUR_MS,
+                10 * HOUR_MS,
+                0,
+            ))
             .unwrap();
         // Straddling start: contributes 1h (6h–7h)
         storage
@@ -1840,4 +1902,3 @@ mod tests {
         assert_eq!(timeline[0].idle_seconds, 30);
     }
 }
-

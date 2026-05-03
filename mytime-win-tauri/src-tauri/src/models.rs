@@ -45,9 +45,9 @@ pub struct Label {
 #[serde(rename_all = "lowercase")]
 pub enum LabelSource {
     Heuristic,
-    User,    // From classification rules
+    User, // From classification rules
     Ai,
-    Manual,  // Direct user assignment (highest priority)
+    Manual, // Direct user assignment (highest priority)
 }
 
 impl LabelSource {
@@ -110,12 +110,12 @@ pub struct AppSummary {
 /// Summary of time spent per context within an app (e.g., sites within a browser)
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct ContextSummary {
-    pub context: String,                // Site/domain extracted from title (e.g., "youtube", "github")
-    pub category: Option<String>,       // Category for this context
-    pub total_duration_ms: i64,         // Total time
-    pub idle_duration_ms: i64,          // Idle time
+    pub context: String, // Site/domain extracted from title (e.g., "youtube", "github")
+    pub category: Option<String>, // Category for this context
+    pub total_duration_ms: i64, // Total time
+    pub idle_duration_ms: i64, // Idle time
     pub segment_count: u32,
-    pub sample_titles: Vec<String>,     // Up to 3 example window titles
+    pub sample_titles: Vec<String>, // Up to 3 example window titles
 }
 
 /// Breakdown row for selected categories (derived from segments).
@@ -237,7 +237,7 @@ pub enum DataLocation {
 pub struct TrackingState {
     pub is_tracking: bool,
     pub session_start_ms: Option<i64>,
-    pub total_time_ms: i64,     // Live total from DB
+    pub total_time_ms: i64,       // Live total from DB
     pub baseline_ms: Option<i64>, // Total at session start (for avoiding double-count)
 }
 
@@ -247,10 +247,10 @@ pub struct TrackingState {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum MatchType {
-    Contains,  // Simple substring match (case-insensitive)
-    Prefix,    // Starts with (case-insensitive)
-    Exact,     // Exact match (case-insensitive)
-    Regex,     // Regular expression
+    Contains, // Simple substring match (case-insensitive)
+    Prefix,   // Starts with (case-insensitive)
+    Exact,    // Exact match (case-insensitive)
+    Regex,    // Regular expression
 }
 
 impl MatchType {
@@ -300,7 +300,6 @@ impl RuleSource {
             _ => RuleSource::Builtin,
         }
     }
-
 }
 
 /// A classification rule for categorizing windows
@@ -312,9 +311,9 @@ pub struct ClassificationRule {
     pub title_pattern: Option<String>, // NULL = match any title
     pub match_type: MatchType,
     pub category: String,
-    pub tags: Option<Vec<String>>,     // Optional tags like ["site:overleaf", "work"]
+    pub tags: Option<Vec<String>>, // Optional tags like ["site:overleaf", "work"]
     pub source: RuleSource,
-    pub priority: i32,                 // Additional priority within same source
+    pub priority: i32, // Additional priority within same source
     pub enabled: bool,
     pub created_at: i64,
 }
@@ -366,10 +365,10 @@ impl ClassificationRule {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum SuggestionStatus {
-    Pending,   // Waiting for user review
-    Approved,  // User approved, rule created
-    Rejected,  // User rejected
-    Expired,   // Auto-expired (too old or pattern no longer matches)
+    Pending,  // Waiting for user review
+    Approved, // User approved, rule created
+    Rejected, // User rejected
+    Expired,  // Auto-expired (too old or pattern no longer matches)
 }
 
 impl SuggestionStatus {
@@ -401,12 +400,12 @@ pub struct AiSuggestion {
     pub title_pattern: Option<String>,
     pub match_type: MatchType,
     pub suggested_category: String,
-    pub confidence: f64,           // 0.0-1.0
-    pub reason: String,            // Why AI suggested this
+    pub confidence: f64,            // 0.0-1.0
+    pub reason: String,             // Why AI suggested this
     pub sample_titles: Vec<String>, // Example titles that would match
-    pub match_count: u32,          // How many historical segments match
-    pub total_duration_ms: i64,    // Total time of matching segments
+    pub match_count: u32,           // How many historical segments match
+    pub total_duration_ms: i64,     // Total time of matching segments
     pub status: SuggestionStatus,
     pub created_at: i64,
-    pub reviewed_at: Option<i64>,  // When user approved/rejected
+    pub reviewed_at: Option<i64>, // When user approved/rejected
 }

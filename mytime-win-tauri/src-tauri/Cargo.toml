@@ -31,6 +31,14 @@ chrono = { version = "0.4", features = ["serde"] }
 # SQLite storage
 rusqlite = { version = "0.31", features = ["bundled"] }
 
+# Faster, panic-free Mutex (no poisoning)
+parking_lot = "0.12"
+
+# Structured logging + rolling file appender
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+tracing-appender = "0.2"
+
 # Hashing for title_hash
 blake3 = "1.5"
 

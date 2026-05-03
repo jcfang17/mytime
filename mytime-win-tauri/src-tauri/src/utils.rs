@@ -154,9 +154,7 @@ pub fn today_start_ms_with_hour(day_start_hour: u32) -> i64 {
         today
     };
 
-    let start_of_day = effective_date
-        .and_hms_opt(day_start_hour, 0, 0)
-        .unwrap();
+    let start_of_day = effective_date.and_hms_opt(day_start_hour, 0, 0).unwrap();
     naive_local_to_ms(start_of_day)
 }
 
@@ -182,7 +180,10 @@ pub fn day_range_ms_with_offset(day_start_hour: u32, offset: i32) -> (i64, i64) 
         .and_hms_opt(day_start_hour, 0, 0)
         .unwrap();
 
-    (naive_local_to_ms(start_of_day), naive_local_to_ms(end_of_day))
+    (
+        naive_local_to_ms(start_of_day),
+        naive_local_to_ms(end_of_day),
+    )
 }
 
 /// Format a date for display based on day offset
@@ -209,8 +210,19 @@ pub fn format_day_label(day_start_hour: u32, offset: i32) -> String {
 
 /// Known browser app names (lowercase, without .exe)
 const BROWSER_APPS: &[&str] = &[
-    "msedge", "chrome", "firefox", "brave", "opera", "vivaldi", "arc",
-    "safari", "chromium", "edge", "iexplore", "waterfox", "librewolf",
+    "msedge",
+    "chrome",
+    "firefox",
+    "brave",
+    "opera",
+    "vivaldi",
+    "arc",
+    "safari",
+    "chromium",
+    "edge",
+    "iexplore",
+    "waterfox",
+    "librewolf",
 ];
 
 /// Check if an app is a browser
@@ -261,11 +273,12 @@ pub fn extract_browser_context(window_title: &str) -> Option<String> {
     // Pattern 2: "Site Name: ..." (check first segment)
     if let Some(pos) = title.find(": ") {
         let site = title[..pos].trim();
-        // Only use if it looks like a site name (short, no spaces or few)
-        if site.len() < 30 && site.split_whitespace().count() <= 3 {
-            if is_valid_context(site) {
-                return Some(normalize_context(site));
-            }
+        // Only use if it looks like a site name (short, few words) and is recognized
+        if site.len() < 30
+            && site.split_whitespace().count() <= 3
+            && is_valid_context(site)
+        {
+            return Some(normalize_context(site));
         }
     }
 
@@ -303,9 +316,14 @@ fn is_valid_context(s: &str) -> bool {
 
     // Reject common non-site strings (partial match)
     let reject_patterns = [
-        "untitled", "new tab", "loading", "and more",
+        "untitled",
+        "new tab",
+        "loading",
+        "and more",
         "more page",
-        "search results", "google search", "bing search",
+        "search results",
+        "google search",
+        "bing search",
     ];
     if reject_patterns.iter().any(|p| lower.contains(p)) {
         return false;
@@ -313,12 +331,23 @@ fn is_valid_context(s: &str) -> bool {
 
     // Reject browser names (exact or with profile suffix like "Microsoft Edge - Work")
     let browser_names = [
-        "microsoft edge", "google chrome", "mozilla firefox",
-        "brave", "opera", "vivaldi", "safari", "chromium",
-        "edge", "chrome", "firefox",
+        "microsoft edge",
+        "google chrome",
+        "mozilla firefox",
+        "brave",
+        "opera",
+        "vivaldi",
+        "safari",
+        "chromium",
+        "edge",
+        "chrome",
+        "firefox",
     ];
     // Check if it IS a browser name or STARTS WITH a browser name (handles "Microsoft Edge - Work")
-    if browser_names.iter().any(|b| lower == *b || lower.starts_with(&format!("{} -", b))) {
+    if browser_names
+        .iter()
+        .any(|b| lower == *b || lower.starts_with(&format!("{} -", b)))
+    {
         return false;
     }
 
@@ -331,8 +360,14 @@ fn is_valid_context(s: &str) -> bool {
 
     // Reject exact profile names (case-insensitive)
     let profile_names = [
-        "personal", "work", "default", "profile 1", "profile 2",
-        "guest", "incognito", "private",
+        "personal",
+        "work",
+        "default",
+        "profile 1",
+        "profile 2",
+        "guest",
+        "incognito",
+        "private",
     ];
     if profile_names.iter().any(|p| lower == *p) {
         return false;
@@ -553,8 +588,17 @@ mod tests {
         );
 
         // Browser name with profile suffix should be rejected
-        assert_eq!(extract_browser_context("Page - Microsoft Edge - Work"), None);
-        assert_eq!(extract_browser_context("Page - Microsoft Edge - Personal"), None);
-        assert_eq!(extract_browser_context("Tab - Google Chrome - Profile 1"), None);
+        assert_eq!(
+            extract_browser_context("Page - Microsoft Edge - Work"),
+            None
+        );
+        assert_eq!(
+            extract_browser_context("Page - Microsoft Edge - Personal"),
+            None
+        );
+        assert_eq!(
+            extract_browser_context("Tab - Google Chrome - Profile 1"),
+            None
+        );
     }
 }

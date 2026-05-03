@@ -376,14 +376,7 @@ fn is_productivity(app: &str, title: &str) -> bool {
     if matches_any(
         title,
         &[
-            "notion",
-            "obsidian",
-            "roam",
-            "logseq",
-            "evernote",
-            "onenote",
-            "bear",
-            "craft",
+            "notion", "obsidian", "roam", "logseq", "evernote", "onenote", "bear", "craft",
             "remnote",
         ],
     ) || matches_any(app, &["notion.exe", "obsidian.exe", "onenote.exe"])

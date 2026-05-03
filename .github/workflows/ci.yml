@@ -1,0 +1,62 @@
+name: CI
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+    branches: [master]
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  windows-tauri:
+    name: Windows Tauri (Rust + frontend)
+    runs-on: windows-latest
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 9
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: pnpm
+          cache-dependency-path: mytime-win-tauri/pnpm-lock.yaml
+
+      - name: Setup Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+
+      - name: Cargo cache
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: mytime-win-tauri/src-tauri -> target
+
+      - name: pnpm install
+        working-directory: mytime-win-tauri
+        run: pnpm install --frozen-lockfile
+
+      - name: cargo fmt --check
+        working-directory: mytime-win-tauri/src-tauri
+        run: cargo fmt --check
+
+      - name: cargo clippy
+        working-directory: mytime-win-tauri/src-tauri
+        run: cargo clippy --lib --tests -- -D warnings
+
+      - name: cargo test
+        working-directory: mytime-win-tauri/src-tauri
+        run: cargo test --lib
+
+      - name: pnpm build (tsc + vite)
+        working-directory: mytime-win-tauri
+        run: pnpm build

@@ -254,8 +254,11 @@ pub fn track_foreground_window(
                     let focus_session_id = current_focus_session_id
                         .clone()
                         .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
-                    current_segment =
-                        Some(PendingSegment::new(&app_name, &window_title, &focus_session_id));
+                    current_segment = Some(PendingSegment::new(
+                        &app_name,
+                        &window_title,
+                        &focus_session_id,
+                    ));
                 }
             } else {
                 // No current segment, start one if tracker is stable
@@ -265,8 +268,11 @@ pub fn track_foreground_window(
                         current_focus_session_id = Some(id.clone());
                         id
                     });
-                    current_segment =
-                        Some(PendingSegment::new(&app_name, &window_title, &focus_session_id));
+                    current_segment = Some(PendingSegment::new(
+                        &app_name,
+                        &window_title,
+                        &focus_session_id,
+                    ));
                 }
             }
         }
@@ -288,14 +294,10 @@ pub fn track_foreground_window(
 }
 
 /// Save segment to storage and call callback
-fn save_segment(
-    storage: &SqliteStorage,
-    segment: &Segment,
-    on_segment: Option<&SegmentCallback>,
-) {
+fn save_segment(storage: &SqliteStorage, segment: &Segment, on_segment: Option<&SegmentCallback>) {
     // Save segment to SQLite
     if let Err(e) = storage.insert_segment(segment) {
-        eprintln!("Failed to save segment: {}", e);
+        tracing::error!(segment_id = %segment.segment_id, error = %e, "failed to save segment");
     }
 
     // Create and save label using rules first, then heuristics (only if we have a window title)
@@ -304,7 +306,7 @@ fn save_segment(
     if let Some(ref title) = segment.window_title {
         let label = create_label(storage, &segment.title_hash, &segment.app_name, title);
         if let Err(e) = storage.upsert_label(&label) {
-            eprintln!("Failed to save label: {}", e);
+            tracing::error!(title_hash = %segment.title_hash, error = %e, "failed to save label");
         }
     }
 
@@ -341,13 +343,8 @@ fn get_idle_time() -> Option<u32> {
 #[cfg(windows)]
 fn monitor_activity() {
     unsafe {
-        let keyboard_hook = SetWindowsHookExW(
-            WH_KEYBOARD_LL,
-            Some(keyboard_proc),
-            HINSTANCE::default(),
-            0,
-        )
-        .ok();
+        let keyboard_hook =
+            SetWindowsHookExW(WH_KEYBOARD_LL, Some(keyboard_proc), HINSTANCE::default(), 0).ok();
 
         let mouse_hook =
             SetWindowsHookExW(WH_MOUSE_LL, Some(mouse_proc), HINSTANCE::default(), 0).ok();
@@ -391,14 +388,21 @@ fn get_foreground_window_info() -> Option<(String, String)> {
         GetWindowThreadProcessId(hwnd, Some(&mut process_id));
 
         // Get process handle
-        let process =
-            OpenProcess(PROCESS_QUERY_INFORMATION | PROCESS_VM_READ, false, process_id).ok()?;
+        let process = OpenProcess(
+            PROCESS_QUERY_INFORMATION | PROCESS_VM_READ,
+            false,
+            process_id,
+        )
+        .ok()?;
 
         // Get executable path
         let mut exe_buf = vec![0u16; 512];
         let result = GetModuleFileNameExW(process, HMODULE::default(), &mut exe_buf);
 
-        let actual_len = exe_buf.iter().position(|&c| c == 0).unwrap_or(result as usize);
+        let actual_len = exe_buf
+            .iter()
+            .position(|&c| c == 0)
+            .unwrap_or(result as usize);
         let exe_path = String::from_utf16_lossy(&exe_buf[..actual_len]);
 
         // Extract just the filename
@@ -423,10 +427,7 @@ fn get_foreground_window_info() -> Option<(String, String)> {
 #[cfg(windows)]
 unsafe extern "system" fn keyboard_proc(code: i32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
     // Only count when tracking is active
-    if code >= 0
-        && wparam.0 == WM_KEYDOWN as usize
-        && IS_ACTIVITY_TRACKING.load(Ordering::SeqCst)
-    {
+    if code >= 0 && wparam.0 == WM_KEYDOWN as usize && IS_ACTIVITY_TRACKING.load(Ordering::SeqCst) {
         KEYSTROKE_COUNTER.fetch_add(1, Ordering::SeqCst);
     }
     CallNextHookEx(HHOOK::default(), code, wparam, lparam)
