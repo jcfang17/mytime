@@ -274,10 +274,7 @@ pub fn extract_browser_context(window_title: &str) -> Option<String> {
     if let Some(pos) = title.find(": ") {
         let site = title[..pos].trim();
         // Only use if it looks like a site name (short, few words) and is recognized
-        if site.len() < 30
-            && site.split_whitespace().count() <= 3
-            && is_valid_context(site)
-        {
+        if site.len() < 30 && site.split_whitespace().count() <= 3 && is_valid_context(site) {
             return Some(normalize_context(site));
         }
     }

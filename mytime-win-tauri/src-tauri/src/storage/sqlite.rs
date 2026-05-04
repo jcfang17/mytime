@@ -1837,13 +1837,7 @@ mod tests {
         let win_end = 100 * HOUR_MS;
 
         storage
-            .insert_segment(&make_segment(
-                "mystery.exe",
-                "h1",
-                HOUR_MS,
-                2 * HOUR_MS,
-                0,
-            ))
+            .insert_segment(&make_segment("mystery.exe", "h1", HOUR_MS, 2 * HOUR_MS, 0))
             .unwrap();
 
         let cats = storage
