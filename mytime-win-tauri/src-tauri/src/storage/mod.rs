@@ -36,6 +36,14 @@ pub trait StorageAdapter: Send + Sync {
     /// Insert or update a label
     fn upsert_label(&self, label: &Label) -> StorageResult<()>;
 
+    /// Delete all label rows for a title_hash except manual ones.
+    /// Used when recomputing labels after a rule is deleted/disabled/edited.
+    fn delete_labels_except_manual(&self, title_hash: &str) -> StorageResult<()>;
+
+    /// All distinct (title_hash, app_name, window_title) triples ever seen.
+    /// Used to recompute labels across history when rules change.
+    fn get_distinct_titles(&self) -> StorageResult<Vec<(String, String, String)>>;
+
     // === Derived Queries ===
 
     /// Get app breakdown for a time range

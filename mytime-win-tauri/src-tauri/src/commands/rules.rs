@@ -1,11 +1,43 @@
 //! Commands for classification-rule CRUD + preview.
 
 use super::BACKFILL_DAYS;
+use crate::categorizer::create_label;
 use crate::models::{ClassificationRule, MatchType, RuleSource};
 use crate::storage::StorageAdapter;
 use crate::utils;
 use crate::AppState;
 use tauri::State;
+
+/// Recompute labels for every historical title that matched `rule`, using
+/// the *current* rule set (or heuristics). Called after a rule is deleted,
+/// disabled, or edited so its old labels don't outlive it. Manual labels
+/// are never touched.
+fn recompute_labels_for_rule(state: &AppState, rule: &ClassificationRule) -> Result<u32, String> {
+    let titles = state
+        .storage
+        .get_distinct_titles()
+        .map_err(|e| e.to_string())?;
+
+    let mut updated = 0u32;
+    for (title_hash, app_name, window_title) in titles {
+        if !rule.matches(&app_name, &window_title) {
+            continue;
+        }
+        // Drop the stale rule-produced label rows, then relabel with
+        // whatever matches now (remaining enabled rules, else heuristic).
+        state
+            .storage
+            .delete_labels_except_manual(&title_hash)
+            .map_err(|e| e.to_string())?;
+        let label = create_label(&state.storage, &title_hash, &app_name, &window_title);
+        if state.storage.upsert_label(&label).is_ok() {
+            updated += 1;
+        }
+    }
+
+    tracing::info!(rule_id = %rule.rule_id, updated, "labels recomputed after rule change");
+    Ok(updated)
+}
 
 #[tauri::command]
 pub fn get_rules(state: State<AppState>) -> Result<Vec<ClassificationRule>, String> {
@@ -92,6 +124,10 @@ pub fn update_rule(
         .upsert_rule(&rule)
         .map_err(|e| e.to_string())?;
 
+    // Relabel everything the OLD version of the rule matched, using the
+    // updated rule set — handles disabling and pattern/category edits.
+    recompute_labels_for_rule(&state, &existing)?;
+
     if rule.enabled {
         if let Err(e) = state.storage.backfill_labels_for_rule(&rule, BACKFILL_DAYS) {
             tracing::warn!(rule_id = %rule.rule_id, error = %e, "backfill failed");
@@ -103,10 +139,22 @@ pub fn update_rule(
 
 #[tauri::command]
 pub fn delete_rule(state: State<AppState>, rule_id: String) -> Result<(), String> {
+    let existing = state
+        .storage
+        .get_rule(&rule_id)
+        .map_err(|e| e.to_string())?;
+
     state
         .storage
         .delete_rule(&rule_id)
-        .map_err(|e| e.to_string())
+        .map_err(|e| e.to_string())?;
+
+    // Labels the deleted rule produced must not outlive it.
+    if let Some(rule) = existing {
+        recompute_labels_for_rule(&state, &rule)?;
+    }
+
+    Ok(())
 }
 
 /// Preview result for rule testing

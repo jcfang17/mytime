@@ -384,6 +384,28 @@ impl StorageAdapter for SqliteStorage {
         Ok(())
     }
 
+    fn delete_labels_except_manual(&self, title_hash: &str) -> StorageResult<()> {
+        let conn = self.conn.lock();
+        conn.execute(
+            "DELETE FROM labels WHERE title_hash = ?1 AND source != 'manual'",
+            params![title_hash],
+        )?;
+        Ok(())
+    }
+
+    fn get_distinct_titles(&self) -> StorageResult<Vec<(String, String, String)>> {
+        let conn = self.conn.lock();
+        let mut stmt = conn.prepare(
+            "SELECT DISTINCT title_hash, app_name, COALESCE(window_title, '') FROM segments",
+        )?;
+        let rows = stmt
+            .query_map([], |row| {
+                Ok((row.get(0)?, row.get(1)?, row.get(2)?))
+            })?
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok(rows)
+    }
+
     fn get_app_breakdown(&self, start_ms: i64, end_ms: i64) -> StorageResult<Vec<AppSummary>> {
         let conn = self.conn.lock();
 
@@ -1875,6 +1897,56 @@ mod tests {
         assert_eq!(breakdown.len(), 1);
         assert_eq!(breakdown[0].segment_count, 2);
         assert_eq!(breakdown[0].total_duration_ms, 3 * HOUR_MS);
+    }
+
+    /// A deleted rule's labels must not survive it: cleanup removes them
+    /// (sparing manual labels) and relabeling falls back to heuristics.
+    #[test]
+    fn rule_label_cleanup_preserves_manual_and_relabels() {
+        use crate::categorizer::create_label;
+        use crate::models::{ClassificationRule, MatchType, RuleSource};
+
+        let storage = SqliteStorage::new_in_memory().unwrap();
+        storage
+            .insert_segment(&make_segment("foo.exe", "h1", HOUR_MS, 2 * HOUR_MS, 0))
+            .unwrap();
+
+        let rule = ClassificationRule {
+            rule_id: "r1".into(),
+            app_pattern: Some("foo.exe".into()),
+            title_pattern: None,
+            match_type: MatchType::Contains,
+            category: "productivity".into(),
+            tags: None,
+            source: RuleSource::User,
+            priority: 0,
+            enabled: true,
+            created_at: 0,
+        };
+        storage.upsert_rule(&rule).unwrap();
+
+        // Label produced by the rule
+        let label = create_label(&storage, "h1", "foo.exe", "h1-title");
+        assert_eq!(label.category, "productivity");
+        storage.upsert_label(&label).unwrap();
+
+        // Rule goes away; recompute what the command does per matching title
+        storage.delete_rule("r1").unwrap();
+        storage.delete_labels_except_manual("h1").unwrap();
+        let relabeled = create_label(&storage, "h1", "foo.exe", "h1-title");
+        storage.upsert_label(&relabeled).unwrap();
+
+        let best = storage.get_label("h1").unwrap().unwrap();
+        assert_eq!(best.category, "unknown", "stale rule label must not survive");
+
+        // Manual labels are never touched by cleanup
+        storage
+            .upsert_label(&make_label("h1", "development", LabelSource::Manual))
+            .unwrap();
+        storage.delete_labels_except_manual("h1").unwrap();
+        let best = storage.get_label("h1").unwrap().unwrap();
+        assert_eq!(best.source, LabelSource::Manual);
+        assert_eq!(best.category, "development");
     }
 
     /// Checkpointing re-saves the open segment under the same segment_id;
