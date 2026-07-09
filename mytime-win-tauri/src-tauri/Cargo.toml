@@ -59,9 +59,11 @@ image = { version = "0.25", default-features = false, features = ["png"] }
 windows = { version = "0.58", features = [
     "Win32_Foundation",
     "Win32_UI_WindowsAndMessaging",
+    "Win32_UI_Accessibility",         # SetWinEventHook for foreground events
     "Win32_System_Threading",
     "Win32_UI_Input_KeyboardAndMouse",
     "Win32_System_ProcessStatus",
+    "Win32_System_StationsAndDesktops", # OpenInputDesktop for lock detection
     "Win32_System_SystemInformation",
     "Win32_Security",
 ] }

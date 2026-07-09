@@ -9,16 +9,22 @@ use crate::storage::{SqliteStorage, StorageAdapter};
 use crate::utils::{compute_title_hash, now_ms};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
-use std::time::{Duration, Instant};
+use std::time::Instant;
 
 #[cfg(windows)]
 use windows::Win32::Foundation::*;
 #[cfg(windows)]
 use windows::Win32::System::ProcessStatus::*;
 #[cfg(windows)]
+use windows::Win32::System::StationsAndDesktops::{
+    CloseDesktop, OpenInputDesktop, DESKTOP_CONTROL_FLAGS, DESKTOP_READOBJECTS,
+};
+#[cfg(windows)]
 use windows::Win32::System::SystemInformation::GetTickCount64;
 #[cfg(windows)]
 use windows::Win32::System::Threading::*;
+#[cfg(windows)]
+use windows::Win32::UI::Accessibility::{SetWinEventHook, UnhookWinEvent, HWINEVENTHOOK};
 #[cfg(windows)]
 use windows::Win32::UI::Input::KeyboardAndMouse::*;
 #[cfg(windows)]
@@ -42,6 +48,54 @@ static CLICK_COUNTER: AtomicU64 = AtomicU64::new(0);
 /// Flag to control whether activity hooks should count events
 /// Only count when tracking is active
 static IS_ACTIVITY_TRACKING: AtomicBool = AtomicBool::new(false);
+
+/// Set by the SetWinEventHook callback when the foreground window changes,
+/// drained by the tracking loop on its next wake.
+static FOREGROUND_DIRTY: AtomicBool = AtomicBool::new(true);
+
+/// Wall-clock gap (ms) above which we treat the gap as a wake-from-suspend
+/// (or a long lock that we missed) and finalize the current segment as of
+/// the previous iteration rather than letting it span the gap.
+const SUSPEND_GAP_THRESHOLD_MS: i64 = 5000;
+
+/// SetWinEventHook callback. Runs on the tracking thread during message
+/// dispatch (WINEVENT_OUTOFCONTEXT), so it must do as little work as
+/// possible — just flag that the foreground may have changed.
+#[cfg(windows)]
+unsafe extern "system" fn win_event_proc(
+    _hook: HWINEVENTHOOK,
+    event: u32,
+    _hwnd: HWND,
+    _id_object: i32,
+    _id_child: i32,
+    _id_event_thread: u32,
+    _dwms_event_time: u32,
+) {
+    if event == EVENT_SYSTEM_FOREGROUND {
+        FOREGROUND_DIRTY.store(true, Ordering::SeqCst);
+    }
+}
+
+/// Detect whether the interactive session is locked. When the user locks
+/// (Win+L) or switches to the secure desktop, processes in the user session
+/// can no longer open the input desktop.
+#[cfg(windows)]
+fn is_session_locked() -> bool {
+    unsafe {
+        match OpenInputDesktop(DESKTOP_CONTROL_FLAGS(0), false, DESKTOP_READOBJECTS) {
+            Ok(desktop) => {
+                let _ = CloseDesktop(desktop);
+                false
+            }
+            Err(_) => true,
+        }
+    }
+}
+
+#[cfg(not(windows))]
+fn is_session_locked() -> bool {
+    false
+}
 
 /// A pending segment that hasn't been finalized yet
 #[derive(Debug, Clone)]
@@ -75,6 +129,12 @@ impl PendingSegment {
 
     fn finalize(self, device_id: Option<String>) -> Segment {
         let end_time_ms = now_ms();
+        self.finalize_with_end(device_id, end_time_ms)
+    }
+
+    /// Finalize with an explicit end time. Used by the suspend-gap and
+    /// session-lock paths so the gap itself isn't attributed to the segment.
+    fn finalize_with_end(self, device_id: Option<String>, end_time_ms: i64) -> Segment {
         Segment {
             segment_id: self.segment_id,
             app_name: self.app_name,
@@ -129,108 +189,168 @@ impl TitleStabilityTracker {
 /// Callback for segment completion
 pub type SegmentCallback = Box<dyn Fn(Segment) + Send + 'static>;
 
-/// Track foreground window and emit segments
+/// Track foreground window and emit segments.
 ///
-/// This is the main tracking function that runs in a separate thread.
-/// It implements the stable-title rule and emits segments to the callback.
+/// Runs on a dedicated thread for the duration of a tracking session.
+/// Foreground changes are delivered event-driven via `SetWinEventHook`;
+/// idle / lock / suspend checks run on a 1-second timer using
+/// `MsgWaitForMultipleObjects` as the wait primitive (so we wake immediately
+/// for any foreground event but otherwise stay parked).
 #[cfg(windows)]
 pub fn track_foreground_window(
     storage: Arc<SqliteStorage>,
     should_stop: Arc<AtomicBool>,
     on_segment: Option<SegmentCallback>,
 ) {
-    // Get device ID for segments
     let device_id = storage.get_device_id().ok();
 
-    // Current state
     let mut current_segment: Option<PendingSegment> = None;
     let mut stability_tracker: Option<TitleStabilityTracker> = None;
     let mut current_focus_session_id: Option<String> = None;
     let mut current_app: Option<String> = None;
     let mut last_app_change_time = Instant::now();
-    let mut last_activity_check = Instant::now();
+    let mut last_iter_ms: i64 = now_ms();
+    let mut last_locked = false;
+    let mut idle_accum_ms: i64 = 0;
 
-    // Reset counters and enable activity tracking
     KEYSTROKE_COUNTER.store(0, Ordering::SeqCst);
     CLICK_COUNTER.store(0, Ordering::SeqCst);
     IS_ACTIVITY_TRACKING.store(true, Ordering::SeqCst);
+    FOREGROUND_DIRTY.store(true, Ordering::SeqCst);
 
-    // Start activity monitor (keyboard/mouse hooks)
+    // Start activity monitor (keyboard/mouse hooks). The Once means we only
+    // spawn one monitor for the lifetime of the process; the activity flag
+    // gates whether events are counted.
     static ACTIVITY_MONITOR_STARTED: std::sync::Once = std::sync::Once::new();
     ACTIVITY_MONITOR_STARTED.call_once(|| {
         std::thread::spawn(monitor_activity);
     });
 
-    loop {
+    // Register a system-wide foreground-change hook on this thread. The
+    // callback runs during message dispatch, so we MUST pump messages below.
+    // SAFETY: hook lifetime is tied to this function — we unhook before exit.
+    let hook = unsafe {
+        SetWinEventHook(
+            EVENT_SYSTEM_FOREGROUND,
+            EVENT_SYSTEM_FOREGROUND,
+            HMODULE::default(),
+            Some(win_event_proc),
+            0, // all processes
+            0, // all threads
+            WINEVENT_OUTOFCONTEXT | WINEVENT_SKIPOWNPROCESS,
+        )
+    };
+    if hook.is_invalid() {
+        tracing::warn!("SetWinEventHook failed; will rely on 1s polling fallback");
+    }
+
+    'outer: loop {
         if should_stop.load(Ordering::SeqCst) {
-            // Disable activity tracking first
-            IS_ACTIVITY_TRACKING.store(false, Ordering::SeqCst);
+            break 'outer;
+        }
 
-            // Finalize current segment on stop
-            if let Some(mut segment) = current_segment.take() {
-                // Collect remaining keystroke/mouse counters before finalizing
-                segment.keystrokes += KEYSTROKE_COUNTER.swap(0, Ordering::SeqCst);
-                segment.mouse_clicks += CLICK_COUNTER.swap(0, Ordering::SeqCst);
+        // Wait up to 1 second for a Windows message (e.g. the foreground
+        // notification) or fall through on timeout for the periodic checks.
+        unsafe {
+            let _ = MsgWaitForMultipleObjects(None, false, 1000, QS_ALLINPUT);
 
-                let duration_ms = now_ms() - segment.start_time_ms;
-                if duration_ms >= TITLE_STABILITY_MS as i64 {
-                    let final_segment = segment.finalize(device_id.clone());
-                    save_segment(&storage, &final_segment, on_segment.as_ref());
+            // Drain any pending messages — DispatchMessageW fires
+            // win_event_proc, which sets FOREGROUND_DIRTY.
+            let mut msg = MSG::default();
+            while PeekMessageW(&mut msg, HWND::default(), 0, 0, PM_REMOVE).as_bool() {
+                if msg.message == WM_QUIT {
+                    break 'outer;
                 }
+                let _ = TranslateMessage(&msg);
+                DispatchMessageW(&msg);
             }
-            break;
         }
 
         let now = Instant::now();
+        let now_ms_val = now_ms();
+        let gap_ms = (now_ms_val - last_iter_ms).max(0);
 
-        // Check idle time every second
-        if now - last_activity_check >= Duration::from_secs(1) {
-            if let Some(idle_ms) = get_idle_time() {
-                if idle_ms > IDLE_THRESHOLD_MS {
-                    if let Some(ref mut seg) = current_segment {
-                        seg.idle_seconds += 1;
-                    }
+        // === Suspend / wake-from-sleep gap detection ===
+        // The system clock advances during suspend, so a wall-clock gap that
+        // dwarfs our 1-second wait window means we were probably suspended
+        // (or held in a long lock that OpenInputDesktop didn't catch).
+        if gap_ms > SUSPEND_GAP_THRESHOLD_MS {
+            tracing::info!(gap_ms, "suspend / long-pause gap detected");
+            if let Some(mut seg) = current_segment.take() {
+                seg.keystrokes += KEYSTROKE_COUNTER.swap(0, Ordering::SeqCst);
+                seg.mouse_clicks += CLICK_COUNTER.swap(0, Ordering::SeqCst);
+                let duration_ms = last_iter_ms - seg.start_time_ms;
+                if duration_ms >= TITLE_STABILITY_MS as i64 {
+                    let final_seg = seg.finalize_with_end(device_id.clone(), last_iter_ms);
+                    save_segment(&storage, &final_seg, on_segment.as_ref());
                 }
             }
-            last_activity_check = now;
+            stability_tracker = None;
+            idle_accum_ms = 0;
         }
 
-        // Get current foreground window
-        if let Some((app_name, window_title)) = get_foreground_window_info() {
-            // Update or create stability tracker
-            match &mut stability_tracker {
-                Some(tracker) => {
-                    tracker.update(&app_name, &window_title);
+        // === Lock / unlock detection ===
+        let locked_now = is_session_locked();
+        if locked_now != last_locked {
+            if locked_now {
+                tracing::info!("session locked");
+                if let Some(mut seg) = current_segment.take() {
+                    seg.keystrokes += KEYSTROKE_COUNTER.swap(0, Ordering::SeqCst);
+                    seg.mouse_clicks += CLICK_COUNTER.swap(0, Ordering::SeqCst);
+                    let duration_ms = now_ms_val - seg.start_time_ms;
+                    if duration_ms >= TITLE_STABILITY_MS as i64 {
+                        let final_seg = seg.finalize(device_id.clone());
+                        save_segment(&storage, &final_seg, on_segment.as_ref());
+                    }
                 }
+                stability_tracker = None;
+                idle_accum_ms = 0;
+            } else {
+                tracing::info!("session unlocked");
+                FOREGROUND_DIRTY.store(true, Ordering::SeqCst);
+            }
+            last_locked = locked_now;
+        }
+        last_iter_ms = now_ms_val;
+        if locked_now {
+            // No segment management while the session is locked.
+            continue 'outer;
+        }
+
+        // === Refresh foreground info ===
+        // Always poll on each wake. The WinEventHook above wakes us sub-second
+        // on HWND changes (foreground app switches), but same-HWND title
+        // changes — e.g. browser tab switches — only show up via this poll
+        // since they don't fire EVENT_SYSTEM_FOREGROUND.
+        FOREGROUND_DIRTY.store(false, Ordering::SeqCst);
+
+        // === Stability + segment state ===
+        if let Some((app_name, window_title)) = get_foreground_window_info() {
+            match &mut stability_tracker {
+                Some(t) => t.update(&app_name, &window_title),
                 None => {
-                    stability_tracker = Some(TitleStabilityTracker::new(&app_name, &window_title));
+                    stability_tracker = Some(TitleStabilityTracker::new(&app_name, &window_title))
                 }
             }
-
             let tracker = stability_tracker.as_ref().unwrap();
 
-            // Check if we need to finalize current segment
             if let Some(ref seg) = current_segment {
                 let title_changed = seg.app_name != app_name || seg.window_title != window_title;
                 let tracker_stable = tracker.is_stable();
                 let tracker_matches_new = tracker.matches(&app_name, &window_title);
                 let prev_app_name = seg.app_name.clone();
 
-                // Finalize if: title changed AND new title is stable AND tracker matches new title
                 if title_changed && tracker_stable && tracker_matches_new {
-                    // Collect metrics before finalizing
                     let mut segment = current_segment.take().unwrap();
                     segment.keystrokes += KEYSTROKE_COUNTER.swap(0, Ordering::SeqCst);
                     segment.mouse_clicks += CLICK_COUNTER.swap(0, Ordering::SeqCst);
 
-                    // Only save if segment is long enough
-                    let duration_ms = now_ms() - segment.start_time_ms;
+                    let duration_ms = now_ms_val - segment.start_time_ms;
                     if duration_ms >= TITLE_STABILITY_MS as i64 {
                         let final_segment = segment.finalize(device_id.clone());
                         save_segment(&storage, &final_segment, on_segment.as_ref());
                     }
 
-                    // Check if this is a new focus session
                     let app_changed = prev_app_name != app_name;
                     let is_new_focus_session = if app_changed {
                         let gap_exceeded = now.duration_since(last_app_change_time).as_millis()
@@ -245,12 +365,10 @@ pub fn track_foreground_window(
                         last_app_change_time = now;
                         current_app = Some(app_name.clone());
                     }
-
                     if is_new_focus_session {
                         current_focus_session_id = Some(uuid::Uuid::new_v4().to_string());
                     }
 
-                    // Start new segment
                     let focus_session_id = current_focus_session_id
                         .clone()
                         .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
@@ -259,25 +377,60 @@ pub fn track_foreground_window(
                         &window_title,
                         &focus_session_id,
                     ));
+                    idle_accum_ms = 0;
                 }
-            } else {
-                // No current segment, start one if tracker is stable
-                if tracker.is_stable() {
-                    let focus_session_id = current_focus_session_id.clone().unwrap_or_else(|| {
-                        let id = uuid::Uuid::new_v4().to_string();
-                        current_focus_session_id = Some(id.clone());
-                        id
-                    });
-                    current_segment = Some(PendingSegment::new(
-                        &app_name,
-                        &window_title,
-                        &focus_session_id,
-                    ));
+            } else if tracker.is_stable() {
+                let focus_session_id = current_focus_session_id.clone().unwrap_or_else(|| {
+                    let id = uuid::Uuid::new_v4().to_string();
+                    current_focus_session_id = Some(id.clone());
+                    id
+                });
+                current_segment = Some(PendingSegment::new(
+                    &app_name,
+                    &window_title,
+                    &focus_session_id,
+                ));
+                if current_app.is_none() {
+                    current_app = Some(app_name.clone());
+                    last_app_change_time = now;
                 }
             }
         }
 
-        std::thread::sleep(Duration::from_millis(100));
+        // === Idle accumulation ===
+        // Past the threshold we accrue idle time at wall-clock speed; any
+        // input drops idle_ms below the threshold and resets the accumulator.
+        if let Some(idle_ms) = get_idle_time() {
+            if idle_ms > IDLE_THRESHOLD_MS {
+                if let Some(ref mut seg) = current_segment {
+                    idle_accum_ms += gap_ms;
+                    while idle_accum_ms >= 1000 {
+                        seg.idle_seconds += 1;
+                        idle_accum_ms -= 1000;
+                    }
+                }
+            } else {
+                idle_accum_ms = 0;
+            }
+        }
+    }
+
+    // === Cleanup ===
+    IS_ACTIVITY_TRACKING.store(false, Ordering::SeqCst);
+    if !hook.is_invalid() {
+        unsafe {
+            let _ = UnhookWinEvent(hook);
+        }
+    }
+
+    if let Some(mut segment) = current_segment.take() {
+        segment.keystrokes += KEYSTROKE_COUNTER.swap(0, Ordering::SeqCst);
+        segment.mouse_clicks += CLICK_COUNTER.swap(0, Ordering::SeqCst);
+        let duration_ms = now_ms() - segment.start_time_ms;
+        if duration_ms >= TITLE_STABILITY_MS as i64 {
+            let final_segment = segment.finalize(device_id.clone());
+            save_segment(&storage, &final_segment, on_segment.as_ref());
+        }
     }
 }
 
