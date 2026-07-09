@@ -2,9 +2,10 @@
 
 export interface TrackingState {
   is_tracking: boolean;
-  session_start_ms: number | null;
-  total_time_ms: number;
-  baseline_ms: number | null; // Total at session start (to avoid double-counting)
+  total_time_ms: number; // Today's total from the DB (checkpointed ~60s)
+  last_capture_ms: number | null; // When the tracker last persisted data
+  last_error: string | null; // Most recent capture error, if any
+  paused_until_ms: number | null; // Quick-pause auto-resume time
 }
 
 export interface AppSummary {

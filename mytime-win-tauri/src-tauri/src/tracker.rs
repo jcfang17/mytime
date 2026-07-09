@@ -7,7 +7,7 @@ use crate::categorizer::create_label;
 use crate::models::Segment;
 use crate::storage::{SqliteStorage, StorageAdapter};
 use crate::utils::{compute_title_hash, now_ms};
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicI64, AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::Instant;
 
@@ -57,6 +57,40 @@ static FOREGROUND_DIRTY: AtomicBool = AtomicBool::new(true);
 /// (or a long lock that we missed) and finalize the current segment as of
 /// the previous iteration rather than letting it span the gap.
 const SUSPEND_GAP_THRESHOLD_MS: i64 = 5000;
+
+/// How often the open (in-flight) segment is persisted so a crash loses at
+/// most this much time and long uninterrupted sessions appear in views.
+const CHECKPOINT_INTERVAL_MS: i64 = 60_000;
+
+/// Wall-clock time of the last successful segment write (0 = never).
+/// Doubles as the capture-health signal surfaced in the UI.
+static LAST_CAPTURE_MS: AtomicI64 = AtomicI64::new(0);
+
+/// Most recent storage error, cleared on the next successful write.
+static LAST_ERROR: parking_lot::Mutex<Option<String>> = parking_lot::Mutex::new(None);
+
+/// When the tracker last persisted anything (None if never).
+pub fn last_capture_ms() -> Option<i64> {
+    let v = LAST_CAPTURE_MS.load(Ordering::SeqCst);
+    (v > 0).then_some(v)
+}
+
+/// Reset the capture clock (called when a tracking session starts so the
+/// live-timer edge doesn't span the stopped period).
+pub fn mark_capture_now() {
+    LAST_CAPTURE_MS.store(now_ms(), Ordering::SeqCst);
+}
+
+/// Most recent capture error, if the last write failed.
+pub fn last_error() -> Option<String> {
+    LAST_ERROR.lock().clone()
+}
+
+/// MyTime itself is never recorded — time spent looking at the tracker is
+/// not activity worth attributing, and recording it pollutes every view.
+fn is_own_app(app_name: &str) -> bool {
+    app_name.to_lowercase().contains("mytime")
+}
 
 /// SetWinEventHook callback. Runs on the tracking thread during message
 /// dispatch (WINEVENT_OUTOFCONTEXT), so it must do as little work as
@@ -212,6 +246,7 @@ pub fn track_foreground_window(
     let mut last_iter_ms: i64 = now_ms();
     let mut last_locked = false;
     let mut idle_accum_ms: i64 = 0;
+    let mut last_checkpoint_ms: i64 = now_ms();
 
     KEYSTROKE_COUNTER.store(0, Ordering::SeqCst);
     CLICK_COUNTER.store(0, Ordering::SeqCst);
@@ -326,6 +361,22 @@ pub fn track_foreground_window(
 
         // === Stability + segment state ===
         if let Some((app_name, window_title)) = get_foreground_window_info() {
+            if is_own_app(&app_name) {
+                // Our own window is in the foreground: close out whatever was
+                // running and record nothing until focus moves elsewhere.
+                if let Some(mut seg) = current_segment.take() {
+                    seg.keystrokes += KEYSTROKE_COUNTER.swap(0, Ordering::SeqCst);
+                    seg.mouse_clicks += CLICK_COUNTER.swap(0, Ordering::SeqCst);
+                    let duration_ms = now_ms_val - seg.start_time_ms;
+                    if duration_ms >= TITLE_STABILITY_MS as i64 {
+                        let final_seg = seg.finalize(device_id.clone());
+                        save_segment(&storage, &final_seg, on_segment.as_ref());
+                    }
+                }
+                stability_tracker = None;
+                idle_accum_ms = 0;
+                continue 'outer;
+            }
             match &mut stability_tracker {
                 Some(t) => t.update(&app_name, &window_title),
                 None => {
@@ -413,6 +464,22 @@ pub fn track_foreground_window(
                 idle_accum_ms = 0;
             }
         }
+
+        // === Periodic checkpoint of the open segment ===
+        // Persist the in-flight segment so a crash loses at most
+        // CHECKPOINT_INTERVAL_MS and long sessions show up in views. The
+        // final write for the same segment_id replaces the checkpoint row.
+        if now_ms_val - last_checkpoint_ms >= CHECKPOINT_INTERVAL_MS {
+            if let Some(ref mut seg) = current_segment {
+                if now_ms_val - seg.start_time_ms >= TITLE_STABILITY_MS as i64 {
+                    seg.keystrokes += KEYSTROKE_COUNTER.swap(0, Ordering::SeqCst);
+                    seg.mouse_clicks += CLICK_COUNTER.swap(0, Ordering::SeqCst);
+                    let snapshot = seg.clone().finalize_with_end(device_id.clone(), now_ms_val);
+                    save_segment(&storage, &snapshot, on_segment.as_ref());
+                }
+            }
+            last_checkpoint_ms = now_ms_val;
+        }
     }
 
     // === Cleanup ===
@@ -448,9 +515,14 @@ pub fn track_foreground_window(
 
 /// Save segment to storage and call callback
 fn save_segment(storage: &SqliteStorage, segment: &Segment, on_segment: Option<&SegmentCallback>) {
-    // Save segment to SQLite
+    // Save segment to SQLite (upsert: checkpoints and the final write share
+    // a segment_id, so the final write replaces the checkpoint row)
     if let Err(e) = storage.insert_segment(segment) {
         tracing::error!(segment_id = %segment.segment_id, error = %e, "failed to save segment");
+        *LAST_ERROR.lock() = Some(format!("Failed to save activity: {e}"));
+    } else {
+        LAST_CAPTURE_MS.store(segment.end_time, Ordering::SeqCst);
+        LAST_ERROR.lock().take();
     }
 
     // Create and save label using rules first, then heuristics (only if we have a window title)

@@ -99,6 +99,14 @@ body {
   color: var(--accent-success);
 }
 
+.tracking-status.paused {
+  color: var(--accent-warning);
+}
+
+.tracking-status.error {
+  color: var(--accent-danger);
+}
+
 /* Main content */
 .main-content {
   flex: 1;

@@ -27,6 +27,28 @@ pub fn format_duration(ms: i64) -> String {
     utils::format_duration_ms(ms)
 }
 
+/// Whether tracking starts automatically when the app launches (default on).
+#[tauri::command]
+pub fn get_auto_track(state: State<AppState>) -> Result<bool, String> {
+    Ok(state
+        .storage
+        .get_config("auto_start_tracking")
+        .map_err(|e| e.to_string())?
+        .map(|v| v == "true")
+        .unwrap_or(true))
+}
+
+#[tauri::command]
+pub fn set_auto_track(state: State<AppState>, enabled: bool) -> Result<(), String> {
+    state
+        .storage
+        .set_config(
+            "auto_start_tracking",
+            if enabled { "true" } else { "false" },
+        )
+        .map_err(|e| e.to_string())
+}
+
 #[tauri::command]
 pub fn get_autostart_enabled(app: AppHandle) -> Result<bool, String> {
     use tauri_plugin_autostart::ManagerExt;

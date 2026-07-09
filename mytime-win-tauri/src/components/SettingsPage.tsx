@@ -9,10 +9,12 @@ interface SettingsPageProps {
   dayOffset: number;
   dayStartHour: number;
   autostartEnabled: boolean;
+  autoTrackEnabled: boolean;
   rules: ClassificationRule[];
   suggestions: AiSuggestion[];
   onDayStartHourChange: (hour: number) => void;
   onAutostartToggle: (enabled: boolean) => void;
+  onAutoTrackToggle: (enabled: boolean) => void;
   onAddRule: () => void;
   onEditRule: (rule: ClassificationRule) => void;
   onDeleteRule: (ruleId: string) => void;
@@ -27,10 +29,12 @@ export function SettingsPage({
   dayOffset,
   dayStartHour,
   autostartEnabled,
+  autoTrackEnabled,
   rules,
   suggestions,
   onDayStartHourChange,
   onAutostartToggle,
+  onAutoTrackToggle,
   onAddRule,
   onEditRule,
   onDeleteRule,
@@ -87,6 +91,14 @@ export function SettingsPage({
             onChange={(e) => onAutostartToggle(e.target.checked)}
           />
           <span>Launch MyTime when you log in</span>
+        </label>
+        <label className="setting-toggle" style={{ marginTop: 10 }}>
+          <input
+            type="checkbox"
+            checked={autoTrackEnabled}
+            onChange={(e) => onAutoTrackToggle(e.target.checked)}
+          />
+          <span>Start tracking automatically when MyTime launches</span>
         </label>
       </section>
 

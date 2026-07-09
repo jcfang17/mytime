@@ -15,6 +15,21 @@ export async function getTrackingState(): Promise<TrackingState> {
   return await invoke("get_tracking_state");
 }
 
+/** Pause tracking; auto-resumes after `minutes` (null = until tomorrow). */
+export async function pauseTracking(
+  minutes: number | null
+): Promise<TrackingState> {
+  return await invoke("pause_tracking", { minutes });
+}
+
+export async function getAutoTrack(): Promise<boolean> {
+  return await invoke("get_auto_track");
+}
+
+export async function setAutoTrack(enabled: boolean): Promise<void> {
+  return await invoke("set_auto_track", { enabled });
+}
+
 export async function getAppBreakdown(dayOffset: number): Promise<AppSummary[]> {
   return await invoke("get_app_breakdown", { dayOffset });
 }

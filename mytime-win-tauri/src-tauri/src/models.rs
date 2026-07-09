@@ -236,9 +236,15 @@ pub enum DataLocation {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TrackingState {
     pub is_tracking: bool,
-    pub session_start_ms: Option<i64>,
-    pub total_time_ms: i64,       // Live total from DB
-    pub baseline_ms: Option<i64>, // Total at session start (for avoiding double-count)
+    /// Today's total from the DB. Includes the open segment up to its last
+    /// checkpoint, so the live timer derives from stored data.
+    pub total_time_ms: i64,
+    /// When the tracker last persisted anything (capture-health signal).
+    pub last_capture_ms: Option<i64>,
+    /// Most recent capture error, if the last write failed.
+    pub last_error: Option<String>,
+    /// If quick-paused, when tracking auto-resumes.
+    pub paused_until_ms: Option<i64>,
 }
 
 // === Classification Rules ===

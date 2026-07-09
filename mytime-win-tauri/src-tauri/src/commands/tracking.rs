@@ -1,4 +1,4 @@
-//! Commands for tracking lifecycle (start/stop) and live state queries.
+//! Commands for tracking lifecycle (start/stop/pause) and live state queries.
 
 use crate::models::TrackingState;
 use crate::storage::StorageAdapter;
@@ -7,56 +7,114 @@ use crate::utils;
 use crate::AppState;
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
-use tauri::State;
+use tauri::{Manager, State};
 
-#[tauri::command]
-pub fn start_tracking(state: State<AppState>) -> Result<TrackingState, String> {
+/// Start the tracking thread. Shared by the command, auto-start at launch,
+/// and quick-pause auto-resume. Clears any active quick pause.
+pub(crate) fn start_tracking_inner(state: &AppState) {
     if state.is_tracking.load(Ordering::SeqCst) {
-        return Ok(get_tracking_state_inner(&state));
+        return;
     }
 
-    // Capture baseline total time before starting (to avoid double-counting)
-    let baseline = state.storage.get_today_total_ms().unwrap_or(0);
-
+    *state.paused_until_ms.lock() = None;
     state.is_tracking.store(true, Ordering::SeqCst);
     state.should_stop.store(false, Ordering::SeqCst);
-    *state.session_start_ms.lock() = Some(utils::now_ms());
-    *state.baseline_ms.lock() = Some(baseline);
+    // Reset the capture clock so the live-timer edge doesn't span the
+    // stopped period.
+    tracker::mark_capture_now();
 
-    // Start tracking thread
     let storage = Arc::clone(&state.storage);
     let should_stop = Arc::clone(&state.should_stop);
-
     let handle = std::thread::spawn(move || {
         tracker::track_foreground_window(storage, should_stop, None);
     });
-
     *state.tracking_thread.lock() = Some(handle);
 
-    tracing::info!(baseline_ms = baseline, "tracking started");
-    Ok(get_tracking_state_inner(&state))
+    tracing::info!("tracking started");
 }
 
-#[tauri::command]
-pub fn stop_tracking(state: State<AppState>) -> Result<TrackingState, String> {
+/// Stop the tracking thread and wait for it to flush the open segment.
+pub(crate) fn stop_tracking_inner(state: &AppState) {
     if !state.is_tracking.load(Ordering::SeqCst) {
-        return Ok(get_tracking_state_inner(&state));
+        return;
     }
 
     state.is_tracking.store(false, Ordering::SeqCst);
     state.should_stop.store(true, Ordering::SeqCst);
 
-    // Wait for tracking thread to finish.
     // Extract handle first to release mutex before join().
     let handle = state.tracking_thread.lock().take();
     if let Some(h) = handle {
         let _ = h.join();
     }
 
-    *state.session_start_ms.lock() = None;
-    *state.baseline_ms.lock() = None;
-
     tracing::info!("tracking stopped");
+}
+
+#[tauri::command]
+pub fn start_tracking(
+    app: tauri::AppHandle,
+    state: State<AppState>,
+) -> Result<TrackingState, String> {
+    start_tracking_inner(&state);
+    crate::update_tray_status(&app, "Tracking");
+    Ok(get_tracking_state_inner(&state))
+}
+
+#[tauri::command]
+pub fn stop_tracking(
+    app: tauri::AppHandle,
+    state: State<AppState>,
+) -> Result<TrackingState, String> {
+    stop_tracking_inner(&state);
+    *state.paused_until_ms.lock() = None;
+    crate::update_tray_status(&app, "Stopped");
+    Ok(get_tracking_state_inner(&state))
+}
+
+/// Quick pause: stop tracking now and auto-resume later.
+/// `minutes = None` pauses until the next day boundary ("until tomorrow").
+#[tauri::command]
+pub fn pause_tracking(
+    app: tauri::AppHandle,
+    state: State<AppState>,
+    minutes: Option<u32>,
+) -> Result<TrackingState, String> {
+    stop_tracking_inner(&state);
+
+    let resume_at = match minutes {
+        Some(m) => utils::now_ms() + (m as i64) * 60_000,
+        None => {
+            let day_start_hour = state
+                .storage
+                .get_day_start_hour()
+                .unwrap_or(utils::DEFAULT_DAY_START_HOUR);
+            // End of today's window = tomorrow's boundary.
+            utils::day_range_ms_with_offset(day_start_hour, 0).1
+        }
+    };
+    *state.paused_until_ms.lock() = Some(resume_at);
+    crate::update_tray_status(&app, "Paused");
+    tracing::info!(resume_at, "tracking paused");
+
+    // Auto-resume: one lightweight thread per pause. The paused_until check
+    // makes stale timers (superseded pause, manual start/stop) no-ops.
+    let app_handle = app.clone();
+    std::thread::spawn(move || {
+        let wait_ms = resume_at - utils::now_ms();
+        if wait_ms > 0 {
+            std::thread::sleep(std::time::Duration::from_millis(wait_ms as u64));
+        }
+        if let Some(st) = app_handle.try_state::<AppState>() {
+            let still_this_pause = *st.paused_until_ms.lock() == Some(resume_at);
+            if still_this_pause && !st.is_tracking.load(Ordering::SeqCst) {
+                start_tracking_inner(&st);
+                crate::update_tray_status(&app_handle, "Tracking");
+                tracing::info!("tracking auto-resumed after pause");
+            }
+        }
+    });
+
     Ok(get_tracking_state_inner(&state))
 }
 
@@ -65,40 +123,22 @@ pub fn get_tracking_state(state: State<AppState>) -> Result<TrackingState, Strin
     Ok(get_tracking_state_inner(&state))
 }
 
-/// Build a `TrackingState` snapshot, detecting day-boundary crossings during a
-/// running session and resetting the baseline so the live timer only shows
-/// today's portion.
+/// Build a `TrackingState` snapshot. The total comes straight from the DB
+/// (checkpointed every ~60s by the tracker), so the timer the user sees is
+/// the stored record plus a small live edge — no separate wall-clock state
+/// that can drift across locks, sleeps, or day boundaries.
 pub(crate) fn get_tracking_state_inner(state: &AppState) -> TrackingState {
     let is_tracking = state.is_tracking.load(Ordering::SeqCst);
 
-    let (session_start_ms, baseline_ms) = {
-        let mut session_start = state.session_start_ms.lock();
-        let mut baseline = state.baseline_ms.lock();
-
-        if is_tracking {
-            if let Some(start) = *session_start {
-                let day_start_hour = state
-                    .storage
-                    .get_day_start_hour()
-                    .unwrap_or(utils::DEFAULT_DAY_START_HOUR);
-                let today_start = utils::today_start_ms_with_hour(day_start_hour);
-
-                if start < today_start {
-                    *session_start = Some(today_start);
-                    *baseline = Some(0);
-                }
-            }
-        }
-
-        (*session_start, *baseline)
-    };
-
-    let total_time_ms = state.storage.get_today_total_ms().unwrap_or(0);
-
     TrackingState {
         is_tracking,
-        session_start_ms,
-        total_time_ms,
-        baseline_ms,
+        total_time_ms: state.storage.get_today_total_ms().unwrap_or(0),
+        last_capture_ms: if is_tracking {
+            tracker::last_capture_ms()
+        } else {
+            None
+        },
+        last_error: tracker::last_error(),
+        paused_until_ms: *state.paused_until_ms.lock(),
     }
 }

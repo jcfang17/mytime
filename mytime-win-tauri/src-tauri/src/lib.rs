@@ -18,7 +18,7 @@ mod utils;
 use parking_lot::Mutex;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
-use storage::SqliteStorage;
+use storage::{SqliteStorage, StorageAdapter};
 use tauri::{
     image::Image,
     menu::{MenuBuilder, MenuItemBuilder},
@@ -30,12 +30,10 @@ use tauri::{
 pub struct AppState {
     pub(crate) storage: Arc<SqliteStorage>,
     pub(crate) is_tracking: AtomicBool,
-    pub(crate) session_start_ms: Mutex<Option<i64>>,
-    /// Total tracked time at the moment a session started — used so the live
-    /// timer adds session-elapsed without double-counting prior segments.
-    pub(crate) baseline_ms: Mutex<Option<i64>>,
     pub(crate) should_stop: Arc<AtomicBool>,
     pub(crate) tracking_thread: Mutex<Option<std::thread::JoinHandle<()>>>,
+    /// If quick-paused, when tracking should auto-resume.
+    pub(crate) paused_until_ms: Mutex<Option<i64>>,
 }
 
 impl AppState {
@@ -44,11 +42,17 @@ impl AppState {
         Ok(Self {
             storage: Arc::new(storage),
             is_tracking: AtomicBool::new(false),
-            session_start_ms: Mutex::new(None),
-            baseline_ms: Mutex::new(None),
             should_stop: Arc::new(AtomicBool::new(false)),
             tracking_thread: Mutex::new(None),
+            paused_until_ms: Mutex::new(None),
         })
+    }
+}
+
+/// Reflect tracking state in the tray tooltip ("MyTime — Tracking/Paused/…").
+pub(crate) fn update_tray_status(app: &AppHandle, status: &str) {
+    if let Some(tray) = app.tray_by_id("main") {
+        let _ = tray.set_tooltip(Some(format!("MyTime — {status}")));
     }
 }
 
@@ -68,6 +72,15 @@ fn setup_tray(app: &AppHandle) -> Result<(), Box<dyn std::error::Error>> {
     let stop_item = MenuItemBuilder::new("Stop Tracking")
         .id("stop")
         .build(app)?;
+    let pause_15_item = MenuItemBuilder::new("Pause 15 minutes")
+        .id("pause15")
+        .build(app)?;
+    let pause_60_item = MenuItemBuilder::new("Pause 1 hour")
+        .id("pause60")
+        .build(app)?;
+    let pause_day_item = MenuItemBuilder::new("Pause until tomorrow")
+        .id("pauseday")
+        .build(app)?;
     let quit_item = MenuItemBuilder::new("Quit").id("quit").build(app)?;
 
     let menu = MenuBuilder::new(app)
@@ -76,12 +89,16 @@ fn setup_tray(app: &AppHandle) -> Result<(), Box<dyn std::error::Error>> {
         .item(&start_item)
         .item(&stop_item)
         .separator()
+        .item(&pause_15_item)
+        .item(&pause_60_item)
+        .item(&pause_day_item)
+        .separator()
         .item(&quit_item)
         .build()?;
 
-    let _tray = TrayIconBuilder::new()
+    let _tray = TrayIconBuilder::with_id("main")
         .menu(&menu)
-        .tooltip("MyTime - Time Tracker")
+        .tooltip("MyTime — Stopped")
         .icon(load_icon())
         .on_menu_event(move |app, event| {
             let id = event.id().as_ref();
@@ -97,6 +114,16 @@ fn setup_tray(app: &AppHandle) -> Result<(), Box<dyn std::error::Error>> {
                 }
                 "stop" => {
                     let _ = app.emit("tray-stop", ());
+                }
+                "pause15" => {
+                    let _ = app.emit("tray-pause", 15u32);
+                }
+                "pause60" => {
+                    let _ = app.emit("tray-pause", 60u32);
+                }
+                "pauseday" => {
+                    // 0 = "until tomorrow" (frontend maps it to minutes: null)
+                    let _ = app.emit("tray-pause", 0u32);
                 }
                 "quit" => {
                     if let Some(state) = app.try_state::<AppState>() {
@@ -167,6 +194,15 @@ pub fn run() {
     let _tracing_guard = init_tracing().expect("Failed to initialize logging");
 
     tauri::Builder::default()
+        // Single-instance must be the first registered plugin. A second
+        // launch focuses the existing window instead of starting a new
+        // tracker against the same database.
+        .plugin(tauri_plugin_single_instance::init(|app, _argv, _cwd| {
+            if let Some(window) = app.get_webview_window("main") {
+                let _ = window.show();
+                let _ = window.set_focus();
+            }
+        }))
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_autostart::init(
@@ -178,6 +214,28 @@ pub fn run() {
             app.manage(state);
 
             setup_tray(app.handle())?;
+
+            // Launched with --minimized (e.g. by autostart): start in the tray.
+            if std::env::args().any(|a| a == "--minimized") {
+                if let Some(window) = app.get_webview_window("main") {
+                    let _ = window.hide();
+                }
+            }
+
+            // Auto-start tracking per saved preference (default on) so a
+            // launched-but-not-tracking app can never silently lose a day.
+            let state = app.state::<AppState>();
+            let auto_track = state
+                .storage
+                .get_config("auto_start_tracking")
+                .ok()
+                .flatten()
+                .map(|v| v == "true")
+                .unwrap_or(true);
+            if auto_track {
+                commands::tracking::start_tracking_inner(&state);
+                update_tray_status(app.handle(), "Tracking");
+            }
 
             Ok(())
         })
@@ -192,6 +250,7 @@ pub fn run() {
             // Tracking lifecycle
             commands::tracking::start_tracking,
             commands::tracking::stop_tracking,
+            commands::tracking::pause_tracking,
             commands::tracking::get_tracking_state,
             // Day-window aggregates
             commands::breakdown::get_app_breakdown,
@@ -218,6 +277,8 @@ pub fn run() {
             commands::settings::format_duration,
             commands::settings::get_autostart_enabled,
             commands::settings::set_autostart_enabled,
+            commands::settings::get_auto_track,
+            commands::settings::set_auto_track,
             // Classification rules
             commands::rules::get_rules,
             commands::rules::get_rule,

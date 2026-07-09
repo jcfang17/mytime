@@ -20,7 +20,9 @@ pub type StorageResult<T> = Result<T, Box<dyn Error + Send + Sync>>;
 pub trait StorageAdapter: Send + Sync {
     // === Segments ===
 
-    /// Insert a new segment
+    /// Insert or replace a segment by segment_id. Replace semantics let the
+    /// tracker checkpoint an open segment and later overwrite it with the
+    /// final values under the same id.
     fn insert_segment(&self, segment: &Segment) -> StorageResult<()>;
 
     /// Get segments within a time range

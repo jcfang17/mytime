@@ -1,6 +1,11 @@
 import { useCallback, useEffect, useState } from "react";
 import { listen } from "@tauri-apps/api/event";
-import { getTrackingState, startTracking, stopTracking } from "../api";
+import {
+  getTrackingState,
+  pauseTracking,
+  startTracking,
+  stopTracking,
+} from "../api";
 import type { TrackingState } from "../types";
 
 const POLL_MS = 1000;
@@ -8,9 +13,10 @@ const POLL_MS = 1000;
 export function useTrackingState() {
   const [trackingState, setTrackingState] = useState<TrackingState>({
     is_tracking: false,
-    session_start_ms: null,
     total_time_ms: 0,
-    baseline_ms: null,
+    last_capture_ms: null,
+    last_error: null,
+    paused_until_ms: null,
   });
 
   const reload = useCallback(async () => {
@@ -40,6 +46,15 @@ export function useTrackingState() {
     }
   }, []);
 
+  const pause = useCallback(async (minutes: number | null) => {
+    try {
+      const state = await pauseTracking(minutes);
+      setTrackingState(state);
+    } catch (err) {
+      console.error("Failed to pause:", err);
+    }
+  }, []);
+
   useEffect(() => {
     reload();
     const interval = setInterval(reload, POLL_MS);
@@ -49,11 +64,16 @@ export function useTrackingState() {
   useEffect(() => {
     const unlistenStart = listen("tray-start", () => start());
     const unlistenStop = listen("tray-stop", () => stop());
+    // Payload is minutes; 0 means "until tomorrow".
+    const unlistenPause = listen<number>("tray-pause", (event) =>
+      pause(event.payload === 0 ? null : event.payload)
+    );
     return () => {
       unlistenStart.then((fn) => fn());
       unlistenStop.then((fn) => fn());
+      unlistenPause.then((fn) => fn());
     };
-  }, [start, stop]);
+  }, [start, stop, pause]);
 
-  return { trackingState, start, stop, reload };
+  return { trackingState, start, stop, pause, reload };
 }

@@ -95,15 +95,13 @@ function App() {
     contexts.invalidate();
   };
 
-  // Live timer display
-  const currentSessionMs =
-    tracking.trackingState.is_tracking && tracking.trackingState.session_start_ms
-      ? Date.now() - tracking.trackingState.session_start_ms
+  // Live timer: today's stored total plus a small live edge since the
+  // tracker last persisted — so what the user sees is what's in the DB.
+  const liveEdgeMs =
+    tracking.trackingState.is_tracking && tracking.trackingState.last_capture_ms
+      ? Math.max(0, Date.now() - tracking.trackingState.last_capture_ms)
       : 0;
-  const displayTimeMs =
-    tracking.trackingState.is_tracking && tracking.trackingState.baseline_ms !== null
-      ? tracking.trackingState.baseline_ms + currentSessionMs
-      : tracking.trackingState.total_time_ms;
+  const displayTimeMs = tracking.trackingState.total_time_ms + liveEdgeMs;
 
   // Handlers
   const handleAppContextMenu = (e: React.MouseEvent, appName: string) => {
@@ -288,7 +286,7 @@ function App() {
       <Sidebar
         currentPage={currentPage}
         onPageChange={setCurrentPage}
-        isTracking={tracking.trackingState.is_tracking}
+        trackingState={tracking.trackingState}
       />
 
       <main className="main-content">
@@ -380,10 +378,12 @@ function App() {
             dayOffset={dayOffset}
             dayStartHour={settings.dayStartHour}
             autostartEnabled={settings.autostartEnabled}
+            autoTrackEnabled={settings.autoTrackEnabled}
             rules={rules.rules}
             suggestions={suggestions.suggestions}
             onDayStartHourChange={handleDayStartHourChange}
             onAutostartToggle={settings.updateAutostart}
+            onAutoTrackToggle={settings.updateAutoTrack}
             onAddRule={handleAddRule}
             onEditRule={handleEditRule}
             onDeleteRule={handleDeleteRule}

@@ -259,7 +259,7 @@ impl StorageAdapter for SqliteStorage {
 
         conn.execute(
             r#"
-            INSERT INTO segments (
+            INSERT OR REPLACE INTO segments (
                 segment_id, app_name, window_title, title_hash,
                 start_time, end_time, idle_seconds, keystrokes, mouse_clicks,
                 focus_session_id, device_id, schema_version, created_at
@@ -1875,6 +1875,26 @@ mod tests {
         assert_eq!(breakdown.len(), 1);
         assert_eq!(breakdown[0].segment_count, 2);
         assert_eq!(breakdown[0].total_duration_ms, 3 * HOUR_MS);
+    }
+
+    /// Checkpointing re-saves the open segment under the same segment_id;
+    /// the write must replace the prior row, not accumulate duplicates.
+    #[test]
+    fn insert_segment_replaces_checkpoint_row() {
+        let storage = SqliteStorage::new_in_memory().unwrap();
+
+        let mut seg = make_segment("code.exe", "h1", HOUR_MS, 2 * HOUR_MS, 10);
+        storage.insert_segment(&seg).unwrap();
+
+        // Same segment_id, later end_time (a checkpoint update / final write)
+        seg.end_time = 3 * HOUR_MS;
+        seg.idle_seconds = 25;
+        storage.insert_segment(&seg).unwrap();
+
+        let segments = storage.get_segments_range(0, 100 * HOUR_MS).unwrap();
+        assert_eq!(segments.len(), 1, "replace, not duplicate");
+        assert_eq!(segments[0].end_time, 3 * HOUR_MS);
+        assert_eq!(segments[0].idle_seconds, 25);
     }
 
     /// Timeline segments should report clamped start/end, not raw segment bounds.
