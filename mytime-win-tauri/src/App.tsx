@@ -95,13 +95,11 @@ function App() {
     contexts.invalidate();
   };
 
-  // Live timer: today's stored total plus a small live edge since the
-  // tracker last persisted — so what the user sees is what's in the DB.
-  const liveEdgeMs =
-    tracking.trackingState.is_tracking && tracking.trackingState.last_capture_ms
-      ? Math.max(0, Date.now() - tracking.trackingState.last_capture_ms)
-      : 0;
-  const displayTimeMs = tracking.trackingState.total_time_ms + liveEdgeMs;
+  // Live timer: today's stored total plus the tracker-computed live edge.
+  // The edge is zero during locks/sleeps/self-focus, so the timer can never
+  // count excluded time and snap back later.
+  const displayTimeMs =
+    tracking.trackingState.total_time_ms + tracking.trackingState.live_edge_ms;
 
   // Handlers
   const handleAppContextMenu = (e: React.MouseEvent, appName: string) => {

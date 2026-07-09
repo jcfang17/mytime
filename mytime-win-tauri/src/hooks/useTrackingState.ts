@@ -15,6 +15,7 @@ export function useTrackingState() {
     is_tracking: false,
     total_time_ms: 0,
     last_capture_ms: null,
+    live_edge_ms: 0,
     last_error: null,
     paused_until_ms: null,
   });

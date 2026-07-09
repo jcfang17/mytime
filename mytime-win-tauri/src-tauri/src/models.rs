@@ -241,6 +241,9 @@ pub struct TrackingState {
     pub total_time_ms: i64,
     /// When the tracker last persisted anything (capture-health signal).
     pub last_capture_ms: Option<i64>,
+    /// Open-segment time not yet persisted. Computed by the tracker, so it
+    /// is zero during locks/sleeps/self-focus and can't inflate the timer.
+    pub live_edge_ms: i64,
     /// Most recent capture error, if the last write failed.
     pub last_error: Option<String>,
     /// If quick-paused, when tracking auto-resumes.

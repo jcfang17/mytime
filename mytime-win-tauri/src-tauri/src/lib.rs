@@ -222,19 +222,36 @@ pub fn run() {
                 }
             }
 
-            // Auto-start tracking per saved preference (default on) so a
-            // launched-but-not-tracking app can never silently lose a day.
+            // A quick pause persists across restarts: restore it instead of
+            // auto-tracking through an explicit "pause until X".
             let state = app.state::<AppState>();
-            let auto_track = state
+            let persisted_pause = state
                 .storage
-                .get_config("auto_start_tracking")
+                .get_config("paused_until_ms")
                 .ok()
                 .flatten()
-                .map(|v| v == "true")
-                .unwrap_or(true);
-            if auto_track {
-                commands::tracking::start_tracking_inner(&state);
-                update_tray_status(app.handle(), "Tracking");
+                .and_then(|v| v.parse::<i64>().ok())
+                .filter(|&v| v > utils::now_ms());
+
+            if let Some(resume_at) = persisted_pause {
+                *state.paused_until_ms.lock() = Some(resume_at);
+                update_tray_status(app.handle(), "Paused");
+                commands::tracking::schedule_auto_resume(app.handle().clone(), resume_at);
+                tracing::info!(resume_at, "restored persisted pause at startup");
+            } else {
+                // Auto-start tracking per saved preference (default on) so a
+                // launched-but-not-tracking app can never silently lose a day.
+                let auto_track = state
+                    .storage
+                    .get_config("auto_start_tracking")
+                    .ok()
+                    .flatten()
+                    .map(|v| v == "true")
+                    .unwrap_or(true);
+                if auto_track {
+                    commands::tracking::start_tracking_inner(&state);
+                    update_tray_status(app.handle(), "Tracking");
+                }
             }
 
             Ok(())

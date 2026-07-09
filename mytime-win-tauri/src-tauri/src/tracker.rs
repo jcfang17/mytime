@@ -69,6 +69,23 @@ static LAST_CAPTURE_MS: AtomicI64 = AtomicI64::new(0);
 /// Most recent storage error, cleared on the next successful write.
 static LAST_ERROR: parking_lot::Mutex<Option<String>> = parking_lot::Mutex::new(None);
 
+/// Timestamp from which un-persisted open-segment time accrues (0 = no open
+/// segment). Zeroed whenever the segment closes — lock, suspend, self-focus,
+/// stop — so the UI's live edge can never count excluded time.
+static OPEN_SINCE_MS: AtomicI64 = AtomicI64::new(0);
+
+/// Milliseconds of open-segment time not yet persisted. This is the live
+/// edge the UI adds to the stored total; it comes from the tracker's actual
+/// state rather than being inferred from write timestamps.
+pub fn live_edge_ms() -> i64 {
+    let anchor = OPEN_SINCE_MS.load(Ordering::SeqCst);
+    if anchor > 0 {
+        (now_ms() - anchor).max(0)
+    } else {
+        0
+    }
+}
+
 /// When the tracker last persisted anything (None if never).
 pub fn last_capture_ms() -> Option<i64> {
     let v = LAST_CAPTURE_MS.load(Ordering::SeqCst);
@@ -148,12 +165,15 @@ struct PendingSegment {
 
 impl PendingSegment {
     fn new(app_name: &str, window_title: &str, focus_session_id: &str) -> Self {
+        let start_time_ms = now_ms();
+        // Anchor the UI live edge at this segment's start.
+        OPEN_SINCE_MS.store(start_time_ms, Ordering::SeqCst);
         Self {
             segment_id: uuid::Uuid::new_v4().to_string(),
             app_name: app_name.to_string(),
             window_title: window_title.to_string(),
             title_hash: compute_title_hash(app_name, window_title),
-            start_time_ms: now_ms(),
+            start_time_ms,
             focus_session_id: focus_session_id.to_string(),
             idle_seconds: 0,
             keystrokes: 0,
@@ -252,6 +272,7 @@ pub fn track_foreground_window(
     CLICK_COUNTER.store(0, Ordering::SeqCst);
     IS_ACTIVITY_TRACKING.store(true, Ordering::SeqCst);
     FOREGROUND_DIRTY.store(true, Ordering::SeqCst);
+    OPEN_SINCE_MS.store(0, Ordering::SeqCst);
 
     // Start activity monitor (keyboard/mouse hooks). The Once means we only
     // spawn one monitor for the lifetime of the process; the activity flag
@@ -322,6 +343,7 @@ pub fn track_foreground_window(
             }
             stability_tracker = None;
             idle_accum_ms = 0;
+            OPEN_SINCE_MS.store(0, Ordering::SeqCst);
         }
 
         // === Lock / unlock detection ===
@@ -340,6 +362,7 @@ pub fn track_foreground_window(
                 }
                 stability_tracker = None;
                 idle_accum_ms = 0;
+                OPEN_SINCE_MS.store(0, Ordering::SeqCst);
             } else {
                 tracing::info!("session unlocked");
                 FOREGROUND_DIRTY.store(true, Ordering::SeqCst);
@@ -375,6 +398,7 @@ pub fn track_foreground_window(
                 }
                 stability_tracker = None;
                 idle_accum_ms = 0;
+                OPEN_SINCE_MS.store(0, Ordering::SeqCst);
                 continue 'outer;
             }
             match &mut stability_tracker {
@@ -476,6 +500,8 @@ pub fn track_foreground_window(
                     seg.mouse_clicks += CLICK_COUNTER.swap(0, Ordering::SeqCst);
                     let snapshot = seg.clone().finalize_with_end(device_id.clone(), now_ms_val);
                     save_segment(&storage, &snapshot, on_segment.as_ref());
+                    // Persisted up to now — restart the live edge from here.
+                    OPEN_SINCE_MS.store(now_ms_val, Ordering::SeqCst);
                 }
             }
             last_checkpoint_ms = now_ms_val;
@@ -499,6 +525,7 @@ pub fn track_foreground_window(
             save_segment(&storage, &final_segment, on_segment.as_ref());
         }
     }
+    OPEN_SINCE_MS.store(0, Ordering::SeqCst);
 }
 
 /// Stub for non-Windows platforms

@@ -4,6 +4,7 @@ export interface TrackingState {
   is_tracking: boolean;
   total_time_ms: number; // Today's total from the DB (checkpointed ~60s)
   last_capture_ms: number | null; // When the tracker last persisted data
+  live_edge_ms: number; // Open-segment time not yet persisted (backend-computed)
   last_error: string | null; // Most recent capture error, if any
   paused_until_ms: number | null; // Quick-pause auto-resume time
 }
