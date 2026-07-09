@@ -5,6 +5,7 @@
 
 pub mod breakdown;
 pub mod digest;
+pub mod history;
 pub mod rules;
 pub mod settings;
 pub mod suggestions;

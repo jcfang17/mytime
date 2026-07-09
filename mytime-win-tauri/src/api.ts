@@ -1,7 +1,7 @@
 // API functions for communicating with the Tauri backend
 
 import { invoke } from "@tauri-apps/api/core";
-import type { TrackingState, AppSummary, ClassificationRule, RulePreview, MatchType, ContextSummary, AiSuggestion, CategoryBreakdownEntry, SelectedBreakdownRow, TimelineSegment, UnknownQueueItem, DailyDigest, LabelProvenance } from "./types";
+import type { TrackingState, AppSummary, ClassificationRule, RulePreview, MatchType, ContextSummary, AiSuggestion, CategoryBreakdownEntry, SelectedBreakdownRow, TimelineSegment, UnknownQueueItem, DailyDigest, DayHistory, LabelProvenance } from "./types";
 
 export async function startTracking(): Promise<TrackingState> {
   return await invoke("start_tracking");
@@ -170,6 +170,22 @@ export async function getDayRange(
   dayOffset: number
 ): Promise<[number, number]> {
   return await invoke("get_day_range", { dayOffset });
+}
+
+// === History API ===
+
+export async function getHistory(
+  days: number,
+  endOffset: number
+): Promise<DayHistory[]> {
+  return await invoke("get_history", { days, endOffset });
+}
+
+export async function getRangeAppBreakdown(
+  startOffset: number,
+  endOffset: number
+): Promise<AppSummary[]> {
+  return await invoke("get_range_app_breakdown", { startOffset, endOffset });
 }
 
 // === Daily Digest API ===

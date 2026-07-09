@@ -13,6 +13,7 @@ import { DateNav } from "./components/DateNav";
 import { DashboardTabs } from "./components/DashboardTabs";
 import type { DashboardTab } from "./components/DashboardTabs";
 import { OverviewTab } from "./components/OverviewTab";
+import { HistoryTab } from "./components/HistoryTab";
 import { CleanupTab } from "./components/CleanupTab";
 import { DigestTab } from "./components/DigestTab";
 import { SettingsPage } from "./components/SettingsPage";
@@ -293,14 +294,16 @@ function App() {
               onStop={tracking.stop}
             />
 
-            <DateNav
-              dayLabel={breakdown.dayLabel}
-              dayOffset={dayOffset}
-              showActiveOnly={showActiveOnly}
-              onPrev={() => setDayOffset((prev) => prev - 1)}
-              onNext={() => setDayOffset((prev) => Math.min(prev + 1, 0))}
-              onToggleActiveOnly={setShowActiveOnly}
-            />
+            {dashboardTab !== "history" && (
+              <DateNav
+                dayLabel={breakdown.dayLabel}
+                dayOffset={dayOffset}
+                showActiveOnly={showActiveOnly}
+                onPrev={() => setDayOffset((prev) => prev - 1)}
+                onNext={() => setDayOffset((prev) => Math.min(prev + 1, 0))}
+                onToggleActiveOnly={setShowActiveOnly}
+              />
+            )}
 
             <DashboardTabs
               active={dashboardTab}
@@ -332,6 +335,17 @@ function App() {
                 provenanceLoading={provenance.loading}
                 onShowProvenance={provenance.show}
                 onClearProvenance={provenance.clear}
+              />
+            )}
+
+            {dashboardTab === "history" && (
+              <HistoryTab
+                showActiveOnly={showActiveOnly}
+                onToggleActiveOnly={setShowActiveOnly}
+                onSelectDay={(offset) => {
+                  setDayOffset(offset);
+                  setDashboardTab("overview");
+                }}
               />
             )}
 

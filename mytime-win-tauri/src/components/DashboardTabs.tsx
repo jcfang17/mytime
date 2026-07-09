@@ -1,4 +1,4 @@
-export type DashboardTab = "overview" | "cleanup" | "digest";
+export type DashboardTab = "overview" | "history" | "cleanup" | "digest";
 
 interface DashboardTabsProps {
   active: DashboardTab;
@@ -18,6 +18,12 @@ export function DashboardTabs({
         onClick={() => onChange("overview")}
       >
         Overview
+      </button>
+      <button
+        className={`dashboard-tab ${active === "history" ? "active" : ""}`}
+        onClick={() => onChange("history")}
+      >
+        History
       </button>
       <button
         className={`dashboard-tab ${active === "cleanup" ? "active" : ""}`}

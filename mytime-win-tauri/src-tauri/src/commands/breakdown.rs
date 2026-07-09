@@ -13,7 +13,7 @@ use tauri::State;
 
 /// Compute the day window for a given offset, using `now_ms()` as the upper
 /// bound when looking at today.
-fn day_window(state: &AppState, day_offset: i32) -> (i64, i64) {
+pub(crate) fn day_window(state: &AppState, day_offset: i32) -> (i64, i64) {
     let day_start_hour = state
         .storage
         .get_day_start_hour()
@@ -25,6 +25,22 @@ fn day_window(state: &AppState, day_offset: i32) -> (i64, i64) {
         end_ms
     };
     (start_ms, end_ms)
+}
+
+/// Drop shell/system noise apps and rows shorter than 5s from a breakdown.
+pub(crate) fn filter_noise_apps(summaries: Vec<AppSummary>) -> Vec<AppSummary> {
+    summaries
+        .into_iter()
+        .filter(|s| {
+            let app_lower = s.app_name.to_lowercase();
+            !app_lower.contains("explorer.exe")
+                && !app_lower.contains("mytime")
+                && !app_lower.contains("searchhost")
+                && !app_lower.contains("shellexperiencehost")
+                && !app_lower.contains("applicationframehost")
+        })
+        .filter(|s| s.total_duration_ms >= 5000)
+        .collect()
 }
 
 #[tauri::command]
@@ -39,20 +55,7 @@ pub fn get_app_breakdown(
         .get_app_breakdown(start_ms, end_ms)
         .map_err(|e| e.to_string())?;
 
-    let filtered: Vec<AppSummary> = summaries
-        .into_iter()
-        .filter(|s| {
-            let app_lower = s.app_name.to_lowercase();
-            !app_lower.contains("explorer.exe")
-                && !app_lower.contains("mytime")
-                && !app_lower.contains("searchhost")
-                && !app_lower.contains("shellexperiencehost")
-                && !app_lower.contains("applicationframehost")
-        })
-        .filter(|s| s.total_duration_ms >= 5000)
-        .collect();
-
-    Ok(filtered)
+    Ok(filter_noise_apps(summaries))
 }
 
 /// Category breakdown entry returned to the frontend.

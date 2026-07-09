@@ -36,7 +36,7 @@
 - [x] Segment-level "Selected Breakdown" (per app/site/category)
 - [ ] Segment-level breakdown for main app list (currently dominant-category per app)
 - [ ] Apply best-label selection (manual > user > ai > heuristic) to all aggregate queries
-- [ ] Historical data views (week, month)
+- [x] Historical data views (week, month) — History tab: per-day stacked category chart, period comparison, range top apps (2026-07-09)
 
 #### macOS Parity
 - [ ] Port SQLite storage to macOS version

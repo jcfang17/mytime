@@ -205,6 +205,9 @@ pub fn run() {
             // Digest + cleanup
             commands::digest::get_unknown_queue,
             commands::digest::get_daily_digest,
+            // History (multi-day views)
+            commands::history::get_history,
+            commands::history::get_range_app_breakdown,
             // Settings
             commands::settings::get_day_start_hour,
             commands::settings::set_day_start_hour,

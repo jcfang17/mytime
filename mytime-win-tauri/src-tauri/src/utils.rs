@@ -206,6 +206,23 @@ pub fn format_day_label(day_start_hour: u32, offset: i32) -> String {
     }
 }
 
+/// Short date and weekday labels for a day offset, e.g. ("Jul 3", "Thu").
+/// Used by the history view where every day needs a compact axis label.
+pub fn day_date_labels(day_start_hour: u32, offset: i32) -> (String, String) {
+    let now = chrono::Local::now();
+    let today = now.date_naive();
+    let effective_today = if now.hour() < day_start_hour {
+        today - chrono::Duration::days(1)
+    } else {
+        today
+    };
+    let target = effective_today + chrono::Duration::days(offset as i64);
+    (
+        target.format("%b %-d").to_string(),
+        target.format("%a").to_string(),
+    )
+}
+
 // === Context Extraction for Browsers ===
 
 /// Known browser app names (lowercase, without .exe)

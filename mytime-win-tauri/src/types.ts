@@ -31,10 +31,20 @@ export const CATEGORY_INFO: Record<
 > = {
   entertainment: { emoji: "🎬", label: "Entertainment", color: "#ef4444" },
   development: { emoji: "💻", label: "Development", color: "#3b82f6" },
-  productivity: { emoji: "📝", label: "Productivity", color: "#22c55e" },
+  productivity: { emoji: "📝", label: "Productivity", color: "#16a34a" },
   communication: { emoji: "💬", label: "Communication", color: "#a855f7" },
   unknown: { emoji: "📁", label: "Other", color: "#6b7280" },
 };
+
+// Fixed stacking/legend order for charts — never re-sorted per data point,
+// so a category keeps its position and color everywhere.
+export const CATEGORY_ORDER: Category[] = [
+  "development",
+  "productivity",
+  "communication",
+  "entertainment",
+  "unknown",
+];
 
 export function getCategoryInfo(category: string | null) {
   return CATEGORY_INFO[(category as Category) || "unknown"] || CATEGORY_INFO.unknown;
@@ -71,6 +81,17 @@ export interface CategoryBreakdownEntry {
   category: string;
   total_ms: number;
   idle_ms: number;
+}
+
+// === History (multi-day views) ===
+
+export interface DayHistory {
+  day_offset: number;
+  date_label: string; // e.g. "Jul 3"
+  weekday: string; // e.g. "Thu"
+  total_ms: number;
+  active_ms: number;
+  categories: CategoryBreakdownEntry[];
 }
 
 // === Context (for browser site/domain breakdown) ===
