@@ -372,8 +372,6 @@ function App() {
 
         {currentPage === "settings" && (
           <SettingsPage
-            dayLabel={breakdown.dayLabel}
-            dayOffset={dayOffset}
             dayStartHour={settings.dayStartHour}
             autostartEnabled={settings.autostartEnabled}
             autoTrackEnabled={settings.autoTrackEnabled}
@@ -389,6 +387,7 @@ function App() {
             onApproveSuggestion={handleApproveSuggestion}
             onRejectSuggestion={handleRejectSuggestion}
             onGenerateSuggestions={handleGenerateSuggestions}
+            onDataChanged={reloadDayData}
           />
         )}
 

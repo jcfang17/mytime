@@ -291,6 +291,8 @@ pub fn run() {
             commands::settings::get_day_start_hour,
             commands::settings::set_day_start_hour,
             commands::settings::export_csv,
+            commands::settings::delete_data_range,
+            commands::settings::open_data_folder,
             commands::settings::format_duration,
             commands::settings::get_autostart_enabled,
             commands::settings::set_autostart_enabled,

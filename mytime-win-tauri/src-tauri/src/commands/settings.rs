@@ -66,11 +66,14 @@ pub fn set_autostart_enabled(app: AppHandle, enabled: bool) -> Result<(), String
     }
 }
 
+/// Export segments as CSV. `start_offset = None` exports all history;
+/// otherwise the window spans `start_offset`'s day through `end_offset`'s.
 #[tauri::command]
 pub async fn export_csv(
     app: AppHandle,
     state: State<'_, AppState>,
-    day_offset: i32,
+    start_offset: Option<i32>,
+    end_offset: i32,
 ) -> Result<usize, String> {
     use tauri_plugin_dialog::DialogExt;
 
@@ -79,8 +82,12 @@ pub async fn export_csv(
         .get_day_start_hour()
         .unwrap_or(utils::DEFAULT_DAY_START_HOUR);
 
-    let day_label = utils::format_day_label(day_start_hour, day_offset);
-    let default_name = format!("mytime-{}.csv", day_label.replace(' ', "-").to_lowercase());
+    let range_label = match start_offset {
+        None => "all-time".to_string(),
+        Some(0) if end_offset == 0 => "today".to_string(),
+        Some(s) => format!("last-{}-days", end_offset - s + 1),
+    };
+    let default_name = format!("mytime-{range_label}.csv");
 
     let file_path = app
         .dialog()
@@ -94,11 +101,14 @@ pub async fn export_csv(
         None => return Ok(0), // user cancelled
     };
 
-    let (start_ms, end_ms) = utils::day_range_ms_with_offset(day_start_hour, day_offset);
-    let end_ms = if day_offset == 0 {
+    let start_ms = match start_offset {
+        None => 0,
+        Some(s) => utils::day_range_ms_with_offset(day_start_hour, s).0,
+    };
+    let end_ms = if end_offset >= 0 {
         utils::now_ms()
     } else {
-        end_ms
+        utils::day_range_ms_with_offset(day_start_hour, end_offset).1
     };
 
     let segments = state
@@ -152,4 +162,51 @@ pub async fn export_csv(
 
     wtr.flush().map_err(|e| e.to_string())?;
     Ok(count)
+}
+
+/// Delete all segments in the window spanning `start_offset`'s day through
+/// `end_offset`'s day (`start_offset = None` deletes everything, including
+/// labels and AI suggestions; rules and settings are kept).
+#[tauri::command]
+pub fn delete_data_range(
+    state: State<AppState>,
+    start_offset: Option<i32>,
+    end_offset: i32,
+) -> Result<u64, String> {
+    let deleted = match start_offset {
+        None => state
+            .storage
+            .delete_all_activity()
+            .map_err(|e| e.to_string())?,
+        Some(s) => {
+            let day_start_hour = state
+                .storage
+                .get_day_start_hour()
+                .unwrap_or(utils::DEFAULT_DAY_START_HOUR);
+            let (start_ms, _) = utils::day_range_ms_with_offset(day_start_hour, s);
+            let end_ms = if end_offset >= 0 {
+                utils::now_ms()
+            } else {
+                utils::day_range_ms_with_offset(day_start_hour, end_offset).1
+            };
+            state
+                .storage
+                .delete_segments_range(start_ms, end_ms)
+                .map_err(|e| e.to_string())?
+        }
+    };
+
+    tracing::info!(deleted, ?start_offset, end_offset, "activity data deleted");
+    Ok(deleted)
+}
+
+/// Open the data folder (database, logs) in Explorer.
+#[tauri::command]
+pub fn open_data_folder() -> Result<(), String> {
+    let dir = crate::storage::SqliteStorage::data_dir().map_err(|e| e.to_string())?;
+    std::process::Command::new("explorer")
+        .arg(dir)
+        .spawn()
+        .map_err(|e| e.to_string())?;
+    Ok(())
 }

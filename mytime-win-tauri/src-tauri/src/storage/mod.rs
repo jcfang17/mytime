@@ -162,4 +162,13 @@ pub trait StorageAdapter: Send + Sync {
 
     /// Run pending migrations
     fn run_migrations(&self) -> StorageResult<()>;
+
+    /// Delete all segments overlapping [start_ms, end_ms). Returns the
+    /// number of segments removed. Labels are left in place (they are
+    /// keyed by title_hash and re-apply if the title reappears).
+    fn delete_segments_range(&self, start_ms: i64, end_ms: i64) -> StorageResult<u64>;
+
+    /// Delete all activity data: segments, labels, and AI suggestions.
+    /// Rules and settings are preserved. Returns segments removed.
+    fn delete_all_activity(&self) -> StorageResult<u64>;
 }

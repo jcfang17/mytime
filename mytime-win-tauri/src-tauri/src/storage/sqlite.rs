@@ -399,9 +399,7 @@ impl StorageAdapter for SqliteStorage {
             "SELECT DISTINCT title_hash, app_name, COALESCE(window_title, '') FROM segments",
         )?;
         let rows = stmt
-            .query_map([], |row| {
-                Ok((row.get(0)?, row.get(1)?, row.get(2)?))
-            })?
+            .query_map([], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))?
             .collect::<Result<Vec<_>, _>>()?;
         Ok(rows)
     }
@@ -1617,6 +1615,23 @@ impl StorageAdapter for SqliteStorage {
         Ok(())
     }
 
+    fn delete_segments_range(&self, start_ms: i64, end_ms: i64) -> StorageResult<u64> {
+        let conn = self.conn.lock();
+        let deleted = conn.execute(
+            "DELETE FROM segments WHERE start_time < ?2 AND end_time > ?1",
+            params![start_ms, end_ms],
+        )?;
+        Ok(deleted as u64)
+    }
+
+    fn delete_all_activity(&self) -> StorageResult<u64> {
+        let conn = self.conn.lock();
+        let deleted = conn.execute("DELETE FROM segments", [])?;
+        conn.execute("DELETE FROM labels", [])?;
+        conn.execute("DELETE FROM ai_suggestions", [])?;
+        Ok(deleted as u64)
+    }
+
     fn run_migrations(&self) -> StorageResult<()> {
         let conn = self.conn.lock();
 
@@ -1937,7 +1952,10 @@ mod tests {
         storage.upsert_label(&relabeled).unwrap();
 
         let best = storage.get_label("h1").unwrap().unwrap();
-        assert_eq!(best.category, "unknown", "stale rule label must not survive");
+        assert_eq!(
+            best.category, "unknown",
+            "stale rule label must not survive"
+        );
 
         // Manual labels are never touched by cleanup
         storage

@@ -74,8 +74,24 @@ export async function setDayStartHour(hour: number): Promise<void> {
   return await invoke("set_day_start_hour", { hour });
 }
 
-export async function exportCsv(dayOffset: number): Promise<number> {
-  return await invoke("export_csv", { dayOffset });
+/** Export CSV for a day-offset range; startOffset null = all history. */
+export async function exportCsv(
+  startOffset: number | null,
+  endOffset: number
+): Promise<number> {
+  return await invoke("export_csv", { startOffset, endOffset });
+}
+
+/** Delete segments in a day-offset range; startOffset null = everything. */
+export async function deleteDataRange(
+  startOffset: number | null,
+  endOffset: number
+): Promise<number> {
+  return await invoke("delete_data_range", { startOffset, endOffset });
+}
+
+export async function openDataFolder(): Promise<void> {
+  return await invoke("open_data_folder");
 }
 
 export async function formatDuration(ms: number): Promise<string> {
