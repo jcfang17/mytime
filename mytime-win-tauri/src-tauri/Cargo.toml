@@ -51,6 +51,9 @@ regex = "1.10"
 # CSV handling for import/export
 csv = "1.3"
 
+# HTTP client for the Anthropic API (AI suggestions + insights)
+reqwest = { version = "0.12", features = ["json"] }
+
 # Image decoding for tray icon
 image = { version = "0.25", default-features = false, features = ["png"] }
 

@@ -1,7 +1,7 @@
 // API functions for communicating with the Tauri backend
 
 import { invoke } from "@tauri-apps/api/core";
-import type { TrackingState, AppSummary, ClassificationRule, RulePreview, MatchType, ContextSummary, AiSuggestion, CategoryBreakdownEntry, SelectedBreakdownRow, TimelineSegment, UnknownQueueItem, DailyDigest, DayHistory, LabelProvenance } from "./types";
+import type { TrackingState, AppSummary, ClassificationRule, RulePreview, MatchType, ContextSummary, AiSuggestion, CategoryBreakdownEntry, SelectedBreakdownRow, TimelineSegment, UnknownQueueItem, DailyDigest, DayHistory, InsightReport, LabelProvenance } from "./types";
 
 export async function startTracking(): Promise<TrackingState> {
   return await invoke("start_tracking");
@@ -226,6 +226,19 @@ export async function approveSuggestion(
 
 export async function rejectSuggestion(suggestionId: string): Promise<void> {
   return await invoke("reject_suggestion", { suggestionId });
+}
+
+export async function generateSuggestions(
+  daysBack: number
+): Promise<AiSuggestion[]> {
+  return await invoke("generate_suggestions", { daysBack });
+}
+
+export async function generateInsights(
+  periodDays: number,
+  endOffset: number
+): Promise<InsightReport> {
+  return await invoke("generate_insights", { periodDays, endOffset });
 }
 
 export async function createSuggestion(

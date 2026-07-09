@@ -7,6 +7,7 @@
 //! configures the system tray, and registers the Tauri commands defined in
 //! `crate::commands::*`.
 
+mod ai;
 mod categorizer;
 mod commands;
 mod models;
@@ -208,6 +209,8 @@ pub fn run() {
             // History (multi-day views)
             commands::history::get_history,
             commands::history::get_range_app_breakdown,
+            // AI insights
+            commands::insights::generate_insights,
             // Settings
             commands::settings::get_day_start_hour,
             commands::settings::set_day_start_hour,
@@ -227,6 +230,7 @@ pub fn run() {
             commands::suggestions::approve_suggestion,
             commands::suggestions::reject_suggestion,
             commands::suggestions::create_suggestion,
+            commands::suggestions::generate_suggestions,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

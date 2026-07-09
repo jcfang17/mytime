@@ -25,9 +25,8 @@ pub struct DayHistory {
 /// Per-day history for the `days` days ending at `end_offset` (inclusive).
 /// Days in the future (offset > 0) are skipped; days without data are
 /// returned with zero totals so the chart shows gaps.
-#[tauri::command]
-pub fn get_history(
-    state: State<AppState>,
+pub(crate) fn collect_history(
+    state: &AppState,
     days: u32,
     end_offset: i32,
 ) -> Result<Vec<DayHistory>, String> {
@@ -44,7 +43,7 @@ pub fn get_history(
             continue;
         }
 
-        let (start_ms, end_ms) = day_window(&state, offset);
+        let (start_ms, end_ms) = day_window(state, offset);
         let breakdown = state
             .storage
             .get_segment_category_breakdown(start_ms, end_ms)
@@ -72,6 +71,15 @@ pub fn get_history(
     }
 
     Ok(history)
+}
+
+#[tauri::command]
+pub fn get_history(
+    state: State<AppState>,
+    days: u32,
+    end_offset: i32,
+) -> Result<Vec<DayHistory>, String> {
+    collect_history(&state, days, end_offset)
 }
 
 /// App breakdown aggregated over a multi-day window, from the start of

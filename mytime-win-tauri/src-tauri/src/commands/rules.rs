@@ -117,12 +117,13 @@ pub struct RulePreview {
     pub sample_titles: Vec<String>,
 }
 
-#[tauri::command]
-pub fn preview_rule_matches(
-    state: State<AppState>,
+/// Compute match statistics for a candidate rule against recent history.
+/// Shared by the rule-form preview and the AI suggestion generator.
+pub(crate) fn compute_rule_preview(
+    state: &AppState,
     app_pattern: Option<String>,
     title_pattern: Option<String>,
-    match_type: String,
+    match_type: MatchType,
     days_back: i32,
 ) -> Result<RulePreview, String> {
     let day_start_hour = state
@@ -141,9 +142,9 @@ pub fn preview_rule_matches(
     // Temporary rule for matching only — never persisted.
     let temp_rule = ClassificationRule {
         rule_id: String::new(),
-        app_pattern: app_pattern.clone(),
-        title_pattern: title_pattern.clone(),
-        match_type: MatchType::from_str(&match_type),
+        app_pattern,
+        title_pattern,
+        match_type,
         category: String::new(),
         tags: None,
         source: RuleSource::User,
@@ -176,4 +177,21 @@ pub fn preview_rule_matches(
         total_duration_ms,
         sample_titles,
     })
+}
+
+#[tauri::command]
+pub fn preview_rule_matches(
+    state: State<AppState>,
+    app_pattern: Option<String>,
+    title_pattern: Option<String>,
+    match_type: String,
+    days_back: i32,
+) -> Result<RulePreview, String> {
+    compute_rule_preview(
+        &state,
+        app_pattern,
+        title_pattern,
+        MatchType::from_str(&match_type),
+        days_back,
+    )
 }

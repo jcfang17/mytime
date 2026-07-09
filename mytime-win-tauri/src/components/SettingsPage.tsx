@@ -19,6 +19,7 @@ interface SettingsPageProps {
   onToggleRule: (rule: ClassificationRule) => void;
   onApproveSuggestion: (suggestionId: string) => void;
   onRejectSuggestion: (suggestionId: string) => void;
+  onGenerateSuggestions: () => Promise<number>;
 }
 
 export function SettingsPage({
@@ -36,8 +37,29 @@ export function SettingsPage({
   onToggleRule,
   onApproveSuggestion,
   onRejectSuggestion,
+  onGenerateSuggestions,
 }: SettingsPageProps) {
   const [exportStatus, setExportStatus] = useState<string | null>(null);
+  const [generating, setGenerating] = useState(false);
+  const [generateStatus, setGenerateStatus] = useState<string | null>(null);
+
+  const handleGenerate = async () => {
+    try {
+      setGenerating(true);
+      setGenerateStatus(null);
+      const count = await onGenerateSuggestions();
+      setGenerateStatus(
+        count === 0
+          ? "No new suggestions — everything confident is already covered"
+          : `${count} new ${count === 1 ? "suggestion" : "suggestions"} to review below`
+      );
+    } catch (err) {
+      console.error("Failed to generate suggestions:", err);
+      setGenerateStatus(String(err));
+    } finally {
+      setGenerating(false);
+    }
+  };
 
   const handleExport = async () => {
     try {
@@ -104,6 +126,28 @@ export function SettingsPage({
             Export to CSV
           </button>
           {exportStatus && <span className="export-status">{exportStatus}</span>}
+        </div>
+      </section>
+
+      <section className="setting-section">
+        <h3>AI Suggestions</h3>
+        <p className="setting-description">
+          Analyze uncategorized activity from the last 14 days with Claude and
+          propose categorization rules for your review. Window titles of
+          uncategorized activity are sent to the Anthropic API (requires
+          ANTHROPIC_API_KEY).
+        </p>
+        <div className="setting-row">
+          <button
+            className="btn btn-primary"
+            onClick={handleGenerate}
+            disabled={generating}
+          >
+            {generating ? "Analyzing..." : "✨ Generate Suggestions"}
+          </button>
+          {generateStatus && (
+            <span className="export-status">{generateStatus}</span>
+          )}
         </div>
       </section>
 

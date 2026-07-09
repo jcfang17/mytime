@@ -94,6 +94,13 @@ export interface DayHistory {
   categories: CategoryBreakdownEntry[];
 }
 
+// === AI Insights ===
+
+export interface InsightReport {
+  headline: string;
+  insights: string[];
+}
+
 // === Context (for browser site/domain breakdown) ===
 
 export interface ContextSummary {

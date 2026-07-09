@@ -1285,6 +1285,62 @@ body {
   max-width: 480px;
 }
 
+.history-insights {
+  margin-bottom: 16px;
+}
+
+.history-insights-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 8px;
+}
+
+.history-insights-header .digest-card-title {
+  margin-bottom: 0;
+}
+
+.history-insights-headline {
+  font-size: 15px;
+  font-weight: 600;
+  margin-bottom: 10px;
+}
+
+.history-insights-list {
+  list-style: none;
+  padding: 0;
+  margin: 0;
+}
+
+.history-insights-list li {
+  position: relative;
+  padding: 6px 0 6px 18px;
+  font-size: 13px;
+  color: var(--text-secondary);
+  border-bottom: 1px solid var(--border-color);
+}
+
+.history-insights-list li:last-child {
+  border-bottom: none;
+}
+
+.history-insights-list li::before {
+  content: "•";
+  position: absolute;
+  left: 4px;
+  color: var(--accent-primary);
+}
+
+.history-insights-error {
+  font-size: 13px;
+  color: var(--accent-danger);
+}
+
+.history-insights-empty {
+  font-size: 13px;
+  color: var(--text-muted);
+}
+
 .history-tooltip-row {
   display: flex;
   align-items: center;

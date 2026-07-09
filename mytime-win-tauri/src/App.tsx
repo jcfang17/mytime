@@ -3,6 +3,7 @@ import {
   approveSuggestion,
   createRule,
   deleteRule,
+  generateSuggestions,
   rejectSuggestion,
   setAppCategory,
   updateRule,
@@ -254,6 +255,12 @@ function App() {
     }
   };
 
+  const handleGenerateSuggestions = async () => {
+    const created = await generateSuggestions(14);
+    await suggestions.reload();
+    return created.length;
+  };
+
   const handleCreateRuleFromContext = (context: ContextSummary, appName: string) => {
     setEditingRule(null);
     setRuleFormInitial({
@@ -383,6 +390,7 @@ function App() {
             onToggleRule={handleToggleRule}
             onApproveSuggestion={handleApproveSuggestion}
             onRejectSuggestion={handleRejectSuggestion}
+            onGenerateSuggestions={handleGenerateSuggestions}
           />
         )}
 

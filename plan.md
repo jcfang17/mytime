@@ -45,7 +45,7 @@
 
 #### Future Features
 - [ ] User label editing UI
-- [ ] AI-powered categorization
+- [x] AI-powered categorization — `generate_suggestions` analyzes the unknown queue with Claude Haiku (Anthropic API, structured outputs) and files suggestions into the approve/reject pipeline; AI period insights card in History tab (2026-07-09)
 - [ ] Cloud sync (optional)
 - [ ] Cross-device deduplication
 

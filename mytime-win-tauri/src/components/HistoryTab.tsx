@@ -1,7 +1,7 @@
-import { useMemo, useState } from "react";
-import { formatDurationLocal } from "../api";
+import { useEffect, useMemo, useState } from "react";
+import { formatDurationLocal, generateInsights } from "../api";
 import { CATEGORY_ORDER, getCategoryInfo } from "../types";
-import type { CategoryBreakdownEntry, DayHistory } from "../types";
+import type { CategoryBreakdownEntry, DayHistory, InsightReport } from "../types";
 import { PERIOD_DAYS, useHistory } from "../hooks/useHistory";
 import type { HistoryPeriod } from "../hooks/useHistory";
 
@@ -35,6 +35,28 @@ export function HistoryTab({
   const [period, setPeriod] = useState<HistoryPeriod>("week");
   const [endOffset, setEndOffset] = useState(0);
   const [tooltip, setTooltip] = useState<BarTooltip | null>(null);
+  const [insights, setInsights] = useState<InsightReport | null>(null);
+  const [insightsLoading, setInsightsLoading] = useState(false);
+  const [insightsError, setInsightsError] = useState<string | null>(null);
+
+  // Insights are period-specific — clear them when the window changes.
+  useEffect(() => {
+    setInsights(null);
+    setInsightsError(null);
+  }, [period, endOffset]);
+
+  const handleGenerateInsights = async () => {
+    try {
+      setInsightsLoading(true);
+      setInsightsError(null);
+      setInsights(await generateInsights(PERIOD_DAYS[period], endOffset));
+    } catch (err) {
+      console.error("Failed to generate insights:", err);
+      setInsightsError(String(err));
+    } finally {
+      setInsightsLoading(false);
+    }
+  };
 
   const periodDays = PERIOD_DAYS[period];
   const { days, prevDays, topApps, loading } = useHistory(period, endOffset);
@@ -265,6 +287,44 @@ export function HistoryTab({
                 </div>
               ))}
             </div>
+          </div>
+
+          <div className="digest-card history-insights">
+            <div className="history-insights-header">
+              <div className="digest-card-title">AI Insights</div>
+              <button
+                className="btn btn-sm btn-secondary"
+                onClick={handleGenerateInsights}
+                disabled={insightsLoading}
+              >
+                {insightsLoading
+                  ? "Analyzing..."
+                  : insights
+                    ? "Regenerate"
+                    : "✨ Generate"}
+              </button>
+            </div>
+            {insightsError && (
+              <p className="history-insights-error">{insightsError}</p>
+            )}
+            {insights && (
+              <>
+                <div className="history-insights-headline">
+                  {insights.headline}
+                </div>
+                <ul className="history-insights-list">
+                  {insights.insights.map((text, i) => (
+                    <li key={i}>{text}</li>
+                  ))}
+                </ul>
+              </>
+            )}
+            {!insights && !insightsError && !insightsLoading && (
+              <p className="history-insights-empty">
+                Ask Claude to look for patterns in this period. Only category
+                and app totals are sent — never window titles.
+              </p>
+            )}
           </div>
 
           {topApps.length > 0 && (
