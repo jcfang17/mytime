@@ -25,9 +25,9 @@
 - [x] Dominant category by duration (not arbitrary segment)
 
 #### Phase 4: Migration & Compatibility
-- [x] CSV import on first run (with user prompt)
+- [ ] CSV import on first run — NOT implemented (previously mis-marked as done; no import code exists)
 - [x] CSV export for today's data
-- [x] Backup old CSV after import
+- [ ] Backup old CSV after import — NOT implemented (depends on CSV import)
 - [x] Configurable day start hour (default 6 AM)
 
 ### Pending / Future Work

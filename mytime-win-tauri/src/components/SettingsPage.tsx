@@ -170,7 +170,7 @@ export function SettingsPage({
       <section className="setting-section">
         <h3>About</h3>
         <p className="setting-description">
-          MyTime v0.1.0 - Personal Time Tracking
+          MyTime v0.2.0 - Personal Time Tracking
         </p>
       </section>
     </div>
